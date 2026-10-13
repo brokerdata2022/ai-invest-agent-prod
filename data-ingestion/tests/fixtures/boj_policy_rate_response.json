@@ -1,0 +1,21 @@
+{
+  "GET_STATS": {
+    "RESULT": {"STATUS": 200, "MESSAGEID": "M181000I", "MESSAGE": "Successfully completed", "DATE": "2026-08-30T09:00:00+09:00"},
+    "PARAMETER": {"FORMAT": "JSON", "LANG": "EN", "DB": "FM01", "CODE": "STRDCLUCON", "STARTDATE": "202608", "ENDDATE": ""},
+    "DATA_INF": {
+      "NEXT_POSITION": null,
+      "DATA_OBJ": [
+        {
+          "SERIES_CODE": "STRDCLUCON",
+          "NAME_OF_TIME_SERIES": "Uncollateralized Overnight Call Rate (average)",
+          "UNIT": "PERCENT PER ANNUM",
+          "FREQUENCY": "DAILY",
+          "CATEGORY": "Financial Markets",
+          "LAST_UPDATE": "20260829",
+          "SURVEY_DATES": ["20260826", "20260827", "20260828", "20260829"],
+          "VALUES": ["0.500", "0.500", null, "0.510"]
+        }
+      ]
+    }
+  }
+}

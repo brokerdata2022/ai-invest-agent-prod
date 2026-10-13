@@ -1,0 +1,44 @@
+{
+  "GET_STATS_DATA": {
+    "RESULT": {"STATUS": 0, "ERROR_MSG": "正常に終了しました。", "DATE": "2026-09-13T10:00:05+09:00"},
+    "PARAMETER": {"LANG": "J", "STATS_DATA_ID": "0004052037", "METAGET_FLG": "Y"},
+    "STATISTICAL_DATA": {
+      "RESULT_INF": {"TOTAL_NUMBER": 3, "FROM_NUMBER": 1, "TO_NUMBER": 3},
+      "CLASS_INF": {
+        "CLASS_OBJ": [
+          {
+            "@id": "tab",
+            "@name": "表章項目",
+            "CLASS": [
+              {"@code": "01", "@name": "指数", "@level": "1"},
+              {"@code": "02", "@name": "前年同月比", "@level": "1"}
+            ]
+          },
+          {
+            "@id": "cat01",
+            "@name": "類・品目",
+            "CLASS": {"@code": "0001", "@name": "総合", "@level": "1"}
+          },
+          {
+            "@id": "area",
+            "@name": "地域",
+            "CLASS": {"@code": "00000", "@name": "全国", "@level": "1"}
+          },
+          {
+            "@id": "time",
+            "@name": "時間軸(月次)",
+            "CLASS": [
+              {"@code": "2026060000", "@name": "2026年06月", "@level": "1"}
+            ]
+          }
+        ]
+      },
+      "DATA_INF": {
+        "VALUE": [
+          {"@tab": "01", "@cat01": "0001", "@area": "00000", "@time": "2026060000", "@unit": "", "$": "101.5"},
+          {"@tab": "02", "@cat01": "0001", "@area": "00000", "@time": "2026060000", "@unit": "%", "$": "1.9"}
+        ]
+      }
+    }
+  }
+}

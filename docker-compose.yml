@@ -1,0 +1,79 @@
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${DB_NAME:-invest_agent}
+      POSTGRES_USER: ${DB_USER:-invest_agent}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Задайте DB_PASSWORD у .env}
+    ports:
+      # Прив'язка саме до 127.0.0.1, не до 0.0.0.0: без цього префікса
+      # Docker публікує порт на ВСІХ інтерфейсах і сам додає правило в
+      # iptables, яке проходить "поверх" ufw/firewalld — на VPS
+      # (docs/production-readiness.md — розгортання на сервер) база
+      # опинилась би доступною з інтернету. Локальний доступ (psql,
+      # PostgreSQL-розширення VSCode) через localhost працює так само.
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      # Застосовується автоматично ЛИШЕ при першому створенні volume
+      # (порожній data dir). Якщо schema.sql змінювалась, а volume вже
+      # існував — застосуйте зміни через apply_schema.py, а не покладайтесь
+      # на цей init-скрипт (див. CLAUDE.md, розділ "Як запустити локально").
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-invest_agent}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Контейнер із застосунком: усі залежності встановлені при білді
+  # (Dockerfile), venv на хості не потрібен. Код монтується як volume,
+  # тож зміни у VSCode одразу видно всередині контейнера без ребілду —
+  # ребілд потрібен тільки коли міняється requirements.txt.
+  app:
+    build: .
+    env_file:
+      - .env
+    environment:
+      # Усередині мережі docker compose БД доступна за іменем сервісу,
+      # не localhost. Перекриває значення DB_HOST з .env.
+      DB_HOST: db
+      # Без цього контейнер живе в UTC (образ python:3.12-slim не задає
+      # TZ) — мітки часу в логах скриптів (logging.basicConfig)
+      # відрізнялись від локального годинника користувача на 3 год,
+      # плутало під час живих прогонів (2026-09-27). zoneinfo-дані вже
+      # є в образі (Debian), той самий SCHEDULER_TIMEZONE, що й
+      # orchestration/schedule.py, — одна змінна, один сенс.
+      TZ: ${SCHEDULER_TIMEZONE:-Europe/Kyiv}
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sleep infinity
+
+  # Автоматичний запуск усього конвеєра за розкладом (orchestration/,
+  # APScheduler) — сам стартує з docker compose up і сам перезапускається
+  # при падінні (restart: unless-stopped). Розклад — orchestration/schedule.py.
+  # Ручний запуск окремих скриптів (docker compose exec app ...) — без змін.
+  scheduler:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      TZ: ${SCHEDULER_TIMEZONE:-Europe/Kyiv}
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    command: python orchestration/main.py
+
+volumes:
+  db_data:
+

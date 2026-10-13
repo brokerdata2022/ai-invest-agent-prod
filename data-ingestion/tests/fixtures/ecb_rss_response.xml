@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<channel>
+<title>ECB - Press</title>
+<link>https://www.ecb.europa.eu/press/html/index.en.html</link>
+<description>Latest releases on the ECB website - Press releases, speeches and interviews, press conferences.</description>
+<item>
+  <title>ECB Executive Board member Isabel Schnabel to resign to take senior role at IMF</title>
+  <link>https://www.ecb.europa.eu//press/pr/date/2026/html/ecb.pr260924~bea1dd9824.en.html</link>
+  <guid>https://www.ecb.europa.eu//press/pr/date/2026/html/ecb.pr260924~bea1dd9824.en.html</guid>
+  <pubDate>Thu, 24 Sep 2026 14:00:00 +0200</pubDate>
+</item>
+<item>
+  <title>Monetary policy decisions</title>
+  <link>https://www.ecb.europa.eu//press/pr/date/2026/html/ecb.mp260911.en.html</link>
+  <guid>https://www.ecb.europa.eu//press/pr/date/2026/html/ecb.mp260911.en.html</guid>
+  <pubDate>Thu, 11 Sep 2026 13:45:00 +0200</pubDate>
+</item>
+</channel>
+</rss>

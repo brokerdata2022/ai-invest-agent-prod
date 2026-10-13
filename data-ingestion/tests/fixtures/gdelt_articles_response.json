@@ -1,0 +1,35 @@
+{
+  "articles": [
+    {
+      "url": "https://example-news.com/articles/fed-rate-decision-2026-09-25",
+      "url_mobile": "",
+      "title": "Fed holds rates steady, signals caution on inflation",
+      "seendate": "20260925T140000Z",
+      "socialimage": "https://example-news.com/img/fed.jpg",
+      "domain": "example-news.com",
+      "language": "English",
+      "sourcecountry": "United States"
+    },
+    {
+      "url": "https://example-wire.com/markets/nvidia-earnings-beat",
+      "url_mobile": "",
+      "title": "Nvidia beats earnings expectations on AI demand",
+      "seendate": "20260925T091500Z",
+      "socialimage": "",
+      "domain": "example-wire.com",
+      "language": "English",
+      "sourcecountry": "United States"
+    },
+    {
+      "url": "https://example-wire.com/no-title-here",
+      "seendate": "20260925T091500Z",
+      "domain": "example-wire.com"
+    },
+    {
+      "url": "https://example-wire.com/bad-date",
+      "title": "Malformed date article",
+      "seendate": "not-a-date",
+      "domain": "example-wire.com"
+    }
+  ]
+}

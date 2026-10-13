@@ -1,0 +1,8 @@
+psycopg2-binary>=2.9,<3
+requests>=2.31,<3
+python-dotenv>=1.0,<2
+pytest>=7.4,<9
+apscheduler>=3.10,<4
+# Anthropic SDK — висновки й прогноз (config.py розділ 9, 2026-10-05).
+# 1.x: httpx2-база, Python >=3.10 (контейнер на 3.12).
+anthropic>=1.0,<2

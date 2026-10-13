@@ -1,0 +1,13 @@
+{
+  "cik": 320193,
+  "taxonomy": "us-gaap",
+  "tag": "EarningsPerShareDiluted",
+  "label": "Earnings Per Share, Diluted",
+  "entityName": "Apple Inc.",
+  "units": {
+    "USD/shares": [
+      {"start": "2012-10-01", "end": "2012-12-29", "val": 13.81, "accn": "0000320193-13-000003", "fy": 2013, "fp": "Q1", "form": "10-Q", "filed": "2013-01-23"},
+      {"start": "2012-10-01", "end": "2012-12-29", "val": 1.97, "accn": "0000320193-14-000029", "fy": 2014, "fp": "Q2", "form": "10-Q", "filed": "2014-04-23"}
+    ]
+  }
+}

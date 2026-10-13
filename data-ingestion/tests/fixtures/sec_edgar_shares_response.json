@@ -1,0 +1,12 @@
+{
+  "cik": 320193,
+  "taxonomy": "dei",
+  "tag": "EntityCommonStockSharesOutstanding",
+  "label": "Entity Common Stock, Shares Outstanding",
+  "entityName": "Apple Inc.",
+  "units": {
+    "shares": [
+      {"end": "2025-09-30", "val": 15000000000, "accn": "0000320193-25-000100", "fy": 2025, "fp": "Q4", "form": "10-K", "filed": "2025-11-01"}
+    ]
+  }
+}

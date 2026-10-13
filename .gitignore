@@ -1,0 +1,38 @@
+# Секрети — НІКОЛИ не комітити
+.env
+.env.local
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.kate-swp
+
+# OS
+.DS_Store
+
+# Раннтайм-логи джоб (orchestration/) — не джерело істини, у контейнері
+# створюються наново, прибираються джобою prune_logs через 14 днів.
+logs/
+
+# Локальні/тимчасові дампи БД поза db/backup/. Резерв, що КОМІТИТЬСЯ, —
+# це db/backup/invest_agent_data.sql.gz (нижче явно розігнорений): без
+# нього розгортання дає агента з короткими рядами, а історію
+# спостережень повністю перезібрати неможливо (FRED/ECB віддають
+# глибину, Binance/Twelve Data — ні).
+backup.sql
+backup_*.sql
+*.sql.gz
+!db/backup/*.sql.gz
+
+# Діагностичні зліпки (TROUBLESHOOTING.md, «Коли нічого не допомогло»)
+agent-diag-*.txt

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+<title>Federal Reserve Board - All Press Releases</title>
+<link>https://www.federalreserve.gov/newsevents/pressreleases.htm</link>
+<description>Federal Reserve Board Press Releases</description>
+<item>
+    <title>Federal Reserve Board announces approval of application by Peoples Bancorp Inc.</title>
+    <link><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/orders20260925a.htm]]></link>
+    <guid><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/orders20260925a.htm]]></guid>
+    <description><![CDATA[Federal Reserve Board announces approval of application by Peoples Bancorp Inc.]]></description>
+    <category>Orders on Banking Applications</category>
+    <pubDate><![CDATA[Fri, 25 Sep 2026 20:30:00 GMT]]></pubDate>
+</item>
+<item>
+    <title>Federal Reserve issues FOMC statement</title>
+    <link><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/monetary20260924a.htm]]></link>
+    <guid><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/monetary20260924a.htm]]></guid>
+    <description><![CDATA[Federal Reserve issues FOMC statement]]></description>
+    <category>Monetary Policy</category>
+    <pubDate><![CDATA[Wed, 24 Sep 2026 18:00:00 GMT]]></pubDate>
+</item>
+<item>
+    <title>Item missing pubDate</title>
+    <link><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/broken.htm]]></link>
+    <guid><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/broken.htm]]></guid>
+    <description><![CDATA[Malformed item for tests]]></description>
+    <category>Other</category>
+</item>
+</channel>
+</rss>
