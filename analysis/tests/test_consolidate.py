@@ -147,6 +147,13 @@ def test_mechanical_clustering_merges_same_story_before_llm_sees_it():
 
 
 def test_consolidate_stream_uses_mechanical_source_count_not_llm_count(monkeypatch):
+    # Ключ ОБОВ'ЯЗКОВО теж підміняти, не лише call_deepseek:
+    # llm_common._call_provider перевіряє змінну середовища ДО
+    # виклику провайдера, тож без цього рядка підміна нижче
+    # просто не досягається, і тест падає з LlmError. Без ключа в
+    # середовищі — тобто саме на свіжому розгортанні, де .env ще
+    # не заповнений (знайдено наскрізним тестом 2026-10-13).
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-key")
     monkeypatch.setattr(llm_common, "call_deepseek", lambda *a, **k: json.dumps(VALID_RESPONSE))
 
     saved_calls = []
@@ -167,6 +174,13 @@ def test_consolidate_stream_uses_mechanical_source_count_not_llm_count(monkeypat
 
 
 def test_consolidate_stream_skips_items_duplicating_recent_summaries(monkeypatch):
+    # Ключ ОБОВ'ЯЗКОВО теж підміняти, не лише call_deepseek:
+    # llm_common._call_provider перевіряє змінну середовища ДО
+    # виклику провайдера, тож без цього рядка підміна нижче
+    # просто не досягається, і тест падає з LlmError. Без ключа в
+    # середовищі — тобто саме на свіжому розгортанні, де .env ще
+    # не заповнений (знайдено наскрізним тестом 2026-10-13).
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-key")
     monkeypatch.setattr(llm_common, "call_deepseek", lambda *a, **k: json.dumps(VALID_RESPONSE))
     monkeypatch.setattr("news_analysis.consolidate.log_llm_call", lambda *a, **k: 42)
     monkeypatch.setattr(

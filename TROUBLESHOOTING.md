@@ -72,8 +72,19 @@ Error starting userland proxy: listen tcp4 127.0.0.1:5432: bind: address already
 DB_PORT=5433
 ```
 
-Усередині docker-мережі це нічого не змінює — контейнери спілкуються
-за іменем сервісу `db` і портом 5432.
+Усередині docker-мережі це нічого не змінює: `docker-compose.yml`
+перекриває для `app` і `scheduler` **і** `DB_HOST: db`, **і**
+`DB_PORT: 5432` — тобто `DB_PORT` із `.env` впливає лише на порт
+публікації на хост.
+
+> Так було не завжди. До 2026-10-13 перекривався тільки `DB_HOST`, і
+> `DB_PORT=5433` просочувався в `common/db.py:get_connection()`:
+> кожна джоба падала з `connection to server at "db" (172.19.0.2),
+> port 5433 failed: Connection refused`. Тобто звичайний обхід
+> конфлікту портів ламав агента цілком, а причина виглядала як
+> проблема з базою. Знайдено наскрізним тестом розгортання. Якщо
+> бачите цю помилку — у вас версія до виправлення; перевірте, що в
+> `docker-compose.yml` є обидва рядки.
 
 ### Відновлення бази
 
@@ -133,12 +144,27 @@ docker compose exec app pytest -q --tb=short 2>&1 | tail -40
 docker compose exec app pytest analysis/tests/test_trend.py -x -vv
 ```
 
-Тести не торкаються мережі й бази — лише код. Якщо вони падають
+Тести не торкаються мережі й бази — лише код, і **не потребують
+жодного API-ключа**: усі 1354 проходять на незаповненому `.env`
+(перевірено наскрізним розгортанням 2026-10-13). Якщо вони падають
 одразу після `git clone`, найчастіша причина — старий образ:
 
 ```bash
 docker compose up -d --build
 ```
+
+> Якщо падають рівно ці чотири:
+> `test_consolidate_stream_uses_mechanical_source_count_not_llm_count`,
+> `test_consolidate_stream_skips_items_duplicating_recent_summaries`,
+> `test_merge_stream_merges_and_returns_removed_count`,
+> `test_merge_stream_noop_when_llm_finds_no_duplicates`
+> — з `LlmError: DEEPSEEK_API_KEY не задано`, то у вас версія до
+> 2026-10-13. Вони читали **справжнє** середовище замість мокати ключ:
+> `llm_common._call_provider` перевіряє змінну **до** виклику
+> провайдера, тож підміна `call_deepseek` у тесті не досягалась. У
+> розробці це не було видно (там ключ є), а на свіжому розгортанні
+> виглядало так, ніби зламаний код. Виправлено
+> `monkeypatch.setenv` у кожному з чотирьох.
 
 Тести, які проходять, кажуть **лише** що код цілий. Вони не
 перевіряють наявність даних: на порожній базі всі 1354 пройдуть, а

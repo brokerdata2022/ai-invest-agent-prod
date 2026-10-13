@@ -146,7 +146,7 @@ bash scripts/restore_db.sh
 
          t         |  rows  | from_date  |   to_date
 -------------------+--------+------------+------------
- raw_observations  | 340795 | 2001-09-01 | 2026-10-13
+ raw_observations  | 340795 | 1951-07-01 | 2026-10-13
  sources           |     36 |            |
  watchlist_assets  |     12 |            |
  backtest_verdicts |     71 |            |
@@ -172,7 +172,10 @@ bash scripts/restore_db.sh
 docker compose exec app pytest -q
 ```
 
-Очікується **1354 passed**. Якщо падають — [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+Очікується **1354 passed**. Ключі для цього не потрібні — тести
+перевіряють код і не торкаються ні мережі, ні бази, тож проходять і
+на незаповненому `.env`. Якщо падають —
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ### Крок 6. Зареєструвати Telegram-команди
 

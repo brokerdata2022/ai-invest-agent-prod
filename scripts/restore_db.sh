@@ -85,8 +85,12 @@ docker compose exec -T app python data-ingestion/apply_schema.py
 # FK-тригери, тож порядок таблиць у файлі не має значення. Працює, бо
 # DB_USER у образі postgres/timescaledb — суперюзер.
 echo "  · дані ($(du -h "$DUMP" | cut -f1) стисненого SQL)"
+# -o /dev/null прибирає набори рядків, які повертає сам дамп (кожен
+# SELECT pg_catalog.setval друкує свій результат — 22 таблиці дають
+# 22 блоки шуму, у яких легко не побачити справжню помилку). Помилки
+# йдуть у stderr і далі видні, а ON_ERROR_STOP=1 зупиняє на першій.
 zcat "$DUMP" | docker compose exec -T db \
-  psql -U "$DB_USER" -d "$DB_NAME" -q --no-psqlrc -v ON_ERROR_STOP=1
+  psql -U "$DB_USER" -d "$DB_NAME" -q --no-psqlrc -o /dev/null -v ON_ERROR_STOP=1
 
 # ─── 5. Перевірка живими даними ────────────────────────────────────
 # Не "скрипт не впав", а скільки рядків реально лягло і чи FK цілі:

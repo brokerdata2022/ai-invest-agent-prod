@@ -76,6 +76,13 @@ def test_parse_response_drops_group_left_with_single_item_after_overlap_resoluti
 
 
 def test_merge_stream_merges_and_returns_removed_count(monkeypatch):
+    # Ключ ОБОВ'ЯЗКОВО теж підміняти, не лише call_deepseek:
+    # llm_common._call_provider перевіряє змінну середовища ДО
+    # виклику провайдера, тож без цього рядка підміна нижче
+    # просто не досягається, і тест падає з LlmError. Без ключа в
+    # середовищі — тобто саме на свіжому розгортанні, де .env ще
+    # не заповнений (знайдено наскрізним тестом 2026-10-13).
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-key")
     monkeypatch.setattr(llm_common, "call_deepseek", lambda *a, **k: json.dumps(VALID_RESPONSE))
     monkeypatch.setattr("news_analysis.merge_similar.fetch_mergeable", lambda conn, stream, window_hours: ROWS)
     monkeypatch.setattr("news_analysis.merge_similar.log_llm_call", lambda *a, **k: 42)
@@ -100,6 +107,13 @@ def test_merge_stream_skips_when_fewer_than_two_rows(monkeypatch):
 
 
 def test_merge_stream_noop_when_llm_finds_no_duplicates(monkeypatch):
+    # Ключ ОБОВ'ЯЗКОВО теж підміняти, не лише call_deepseek:
+    # llm_common._call_provider перевіряє змінну середовища ДО
+    # виклику провайдера, тож без цього рядка підміна нижче
+    # просто не досягається, і тест падає з LlmError. Без ключа в
+    # середовищі — тобто саме на свіжому розгортанні, де .env ще
+    # не заповнений (знайдено наскрізним тестом 2026-10-13).
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-key")
     monkeypatch.setattr(llm_common, "call_deepseek", lambda *a, **k: json.dumps({"groups": []}))
     monkeypatch.setattr("news_analysis.merge_similar.fetch_mergeable", lambda conn, stream, window_hours: ROWS)
     monkeypatch.setattr("news_analysis.merge_similar.log_llm_call", lambda *a, **k: 42)
