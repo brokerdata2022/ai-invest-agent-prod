@@ -78,6 +78,7 @@ def fetch_recent_comparisons(
         SELECT ec.id, ec.metric_id, ec.source, ec.observed_at, ec.actual_value,
                ec.expected_value_raw, ec.expected_value_parsed, ec.surprise,
                ec.surprise_pct, ec.comparison_method, ec.created_at,
+               ec.forecast_value_parsed, ec.forecast_method, ec.forecast_verdict,
                rl.impact_level, es.summary AS synthesis_summary
         FROM expectation_comparisons ec
         JOIN release_log rl ON rl.id = ec.release_log_id
@@ -90,6 +91,24 @@ def fetch_recent_comparisons(
     return fetch_dicts(conn, query, (list(impact_levels), limit))
 
 
+# Хто був ближчий до факту. Формулювання описові — звіт не дає
+# інструкцій і не хвалить себе (reporting/CLAUDE.md, "Правило тону").
+_VERDICT_LABEL = {
+    "closer_than_market": "ближче за консенсус",
+    "farther_than_market": "далі за консенсус",
+    "tie": "так само, як консенсус",
+}
+
+# `method` із metric_forecasts: показуємо ЧИМ зроблено прогноз, бо
+# "naive" і "ШІ" — різні твердження (method_selector обирає за
+# показником, analysis/CLAUDE.md).
+_METHOD_LABEL = {
+    "llm": "ШІ",
+    "naive": "naive",
+    "linear_trend": "тренд",
+}
+
+
 def format_message(rows: list[dict]) -> str:
     if not rows:
         return "📊 Нових порівнянь факт/очікування немає."
@@ -100,10 +119,29 @@ def format_message(rows: list[dict]) -> str:
         pct_suffix = f" ({row['surprise_pct']:+.1f}%)" if row["surprise_pct"] is not None else ""
         lines.append(bold(f"{label} — {row['observed_at']}"))
         lines.append(
-            f"Факт {float(row['actual_value']):.4g} vs очікування "
-            f"{float(row['expected_value_parsed']):.4g} (прогноз: {escape_html(row['expected_value_raw'])})"
+            # "консенсус", а не "прогноз": нижче стоїть НАШ прогноз, і
+            # два різні числа одним словом читались би як одне
+            # (живий огляд формату 2026-10-15).
+            f"Факт {float(row['actual_value']):.4g} vs консенсус "
+            f"{float(row['expected_value_parsed']):.4g} ({escape_html(row['expected_value_raw'])})"
         )
         lines.append(f"Сюрприз: {float(row['surprise']):+.4g}{pct_suffix}")
+
+        # ТРИ ЧИСЛА ПОРУЧ (2026-10-15, рішення користувача). Доти
+        # прогноз агента жив в окремому повідомленні, і побачити "ми
+        # побили naive, але програли консенсусу" можна було лише
+        # SQL-запитом. Обчислення — в analysis/expectations (rule:
+        # reporting лише форматує), тут беруться готові поля.
+        if row.get("forecast_value_parsed") is not None:
+            verdict = _VERDICT_LABEL.get(row.get("forecast_verdict"), "")
+            method = _METHOD_LABEL.get(row.get("forecast_method"), row.get("forecast_method") or "")
+            lines.append(
+                f"Наш прогноз {float(row['forecast_value_parsed']):.4g}"
+                + (f" ({method})" if method else "")
+                + (f" — {verdict}" if verdict else "")
+            )
+        else:
+            lines.append("Нашого прогнозу на цей реліз не було")
         if row.get("synthesis_summary"):
             lines.append(f"→ {escape_html(row['synthesis_summary'])}")
         lines.append("")

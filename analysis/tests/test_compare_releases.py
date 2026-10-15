@@ -5,6 +5,9 @@
 (monkeypatch, без реальної БД).
 """
 
+from datetime import date
+from decimal import Decimal
+
 from expectations.compare_releases import compare_one, run_comparison_cycle
 
 CPI_ENTRY = {
@@ -15,7 +18,18 @@ CPI_ENTRY = {
 }
 
 
+def _no_agent_forecast(monkeypatch):
+    """Ці тести перевіряють АРИФМЕТИКУ сюрпризу, не вибір прогнозу
+    (той — test_prerelease_forecast_* нижче). Підміняємо так само, як
+    решту БД-викликів: без цього compare_one пішов би в реальну БД."""
+    monkeypatch.setattr(
+        "expectations.compare_releases.fetch_prerelease_forecast",
+        lambda conn, source, metric_id, observed_at: None,
+    )
+
+
 def test_compare_one_computes_surprise(monkeypatch):
+    _no_agent_forecast(monkeypatch)
     monkeypatch.setattr(
         "expectations.compare_releases.fetch_recent",
         lambda conn, source, metric_id, limit: [
@@ -56,6 +70,7 @@ def test_compare_one_returns_none_when_not_enough_history(monkeypatch):
 
 
 def test_run_comparison_cycle_saves_and_marks_processed(monkeypatch):
+    _no_agent_forecast(monkeypatch)
     saved = []
     processed_ids = []
 
@@ -103,6 +118,7 @@ def test_run_comparison_cycle_marks_processed_even_when_no_forecast(monkeypatch)
 
 
 def test_run_comparison_cycle_respects_metric_filter(monkeypatch):
+    _no_agent_forecast(monkeypatch)
     other_entry = dict(CPI_ENTRY, id=2, metric_id="unemployment_rate", expected_value="4.1%")
     processed_ids = []
 
@@ -125,3 +141,65 @@ def test_run_comparison_cycle_respects_metric_filter(monkeypatch):
     assert len(results) == 1
     assert results[0].metric_id == "unemployment_rate"
     assert processed_ids == [2]
+
+
+# ============================================================
+# Вибір ДОРЕЛІЗНОГО прогнозу (2026-10-15)
+# ============================================================
+
+
+class _ForecastCursor:
+    def __init__(self, row):
+        self._row = row
+        self.query = ""
+        self.params = None
+
+    def execute(self, query, params=None):
+        self.query = query
+        self.params = params
+
+    def fetchone(self):
+        return self._row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _ForecastConn:
+    def __init__(self, row):
+        self._cursor = _ForecastCursor(row)
+
+    def cursor(self):
+        return self._cursor
+
+
+def test_prerelease_forecast_returns_value_and_method():
+    from expectations._db import fetch_prerelease_forecast
+
+    conn = _ForecastConn((Decimal("334.9"), "llm"))
+    assert fetch_prerelease_forecast(conn, "fred", "cpi", date(2026, 9, 1)) == (334.9, "llm")
+
+
+def test_prerelease_forecast_none_when_absent():
+    from expectations._db import fetch_prerelease_forecast
+
+    conn = _ForecastConn(None)
+    assert fetch_prerelease_forecast(conn, "fred", "core_cpi", date(2026, 9, 1)) is None
+
+
+def test_prerelease_forecast_query_excludes_postrelease_rows():
+    """РЕГРЕСІЯ на живу помилку 2026-10-15: після релізу
+    `update_forecasts` одразу пише прогноз на НАСТУПНИЙ період, і він
+    у таблиці найсвіжіший. Умова `based_on_observed_at < %s` — єдине,
+    що не дає порівнювати факт із прогнозом, зробленим ПІСЛЯ факту.
+    Прибрати її й лишити ORDER BY created_at — тихо зламати вимір."""
+    from expectations._db import fetch_prerelease_forecast
+
+    conn = _ForecastConn((Decimal("1"), "llm"))
+    fetch_prerelease_forecast(conn, "fred", "cpi", date(2026, 9, 1))
+
+    assert "based_on_observed_at < %s" in conn.cursor().query
+    assert date(2026, 9, 1) in conn.cursor().params

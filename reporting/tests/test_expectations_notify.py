@@ -55,3 +55,65 @@ def test_format_message_omits_surprise_pct_when_none():
     text = format_message([row])
     assert "some_new_metric" in text
     assert "%)" not in text.split("Сюрприз:")[1]
+
+
+# ============================================================
+# ТРИ ЧИСЛА ПОРУЧ (2026-10-15)
+# ============================================================
+
+_BASE_ROW = {
+    "metric_id": "cpi",
+    "observed_at": date(2026, 9, 1),
+    "actual_value": 0.6485,
+    "expected_value_raw": "0.6%",
+    "expected_value_parsed": 0.6,
+    "surprise": 0.0485,
+    "surprise_pct": 8.1,
+    "comparison_method": "mom_pct",
+}
+
+
+def test_shows_agent_forecast_next_to_fact_and_consensus():
+    """Доти прогноз агента жив в ОКРЕМОМУ повідомленні, і порівняти
+    "ми проти консенсусу" можна було лише SQL-запитом."""
+    row = {
+        **_BASE_ROW,
+        "forecast_value_parsed": 0.2301,
+        "forecast_method": "llm",
+        "forecast_verdict": "farther_than_market",
+    }
+    text = format_message([row])
+
+    assert "0.6485" in text          # факт
+    assert "0.6" in text             # консенсус
+    assert "0.2301" in text          # наш прогноз
+    assert "далі за консенсус" in text
+    assert "ШІ" in text              # чим зроблено прогноз
+
+
+def test_says_plainly_when_there_was_no_forecast():
+    """Відсутність прогнозу — не поразка агента; писати її треба
+    словами, а не пропускати рядок."""
+    row = {**_BASE_ROW, "forecast_value_parsed": None,
+           "forecast_method": None, "forecast_verdict": None}
+    text = format_message([row])
+
+    assert "прогнозу на цей реліз не було" in text
+
+
+def test_market_expectation_is_called_consensus_not_forecast():
+    """Два різні числа не можуть називатись одним словом: нижче стоїть
+    НАШ прогноз (живий огляд формату 2026-10-15)."""
+    row = {**_BASE_ROW, "forecast_value_parsed": 0.23,
+           "forecast_method": "llm", "forecast_verdict": "closer_than_market"}
+    text = format_message([row])
+
+    assert "vs консенсус" in text
+    assert "(прогноз:" not in text
+
+
+def test_older_rows_without_forecast_columns_still_render():
+    """Рядки, записані до появи стовпців, не мають ламати звіт."""
+    text = format_message([dict(_BASE_ROW)])
+
+    assert "CPI" in text

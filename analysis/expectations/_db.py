@@ -8,6 +8,40 @@ parse_expected.py.
 import json
 
 
+def fetch_prerelease_forecast(conn, source: str, metric_id: str, observed_at):
+    """Прогноз агента, що СТОСУВАВСЯ саме цього релізу: (значення, метод).
+
+    **Критична умова — `based_on_observed_at < observed_at`.** Після
+    релізу джоба `update_forecasts` одразу пише НОВИЙ прогноз, уже на
+    наступний період, і він лежить у таблиці найсвіжішим. Узяти
+    «останній прогноз» означало б порівнювати з прогнозом, зробленим
+    ПІСЛЯ факту — тобто з тим, який цей факт уже бачив.
+
+    Живий приклад (2026-10-15, помилка ручного виміру в сесії): для
+    вересневого cpi найсвіжішим був рядок 337.1 із
+    `based_on_observed_at = 2026-09-01`, створений 14.10 — прогноз
+    ЖОВТНЯ. Правильний рядок — 334.9 від 06.10 на серпневих даних.
+
+    `None`, якщо прогнозу не було: це не «агент помилився», а
+    відсутність твердження."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT forecast_value, method
+            FROM metric_forecasts
+            WHERE source = %s AND metric_id = %s
+              AND based_on_observed_at < %s
+            ORDER BY based_on_observed_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (source, metric_id, observed_at),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return float(row[0]), row[1]
+
+
 def save_comparison(conn, result) -> int:
     """result — compare_releases.ComparisonResult."""
     with conn.cursor() as cur:
@@ -16,8 +50,8 @@ def save_comparison(conn, result) -> int:
             INSERT INTO expectation_comparisons
                 (release_log_id, source, metric_id, observed_at, actual_value,
                  expected_value_raw, expected_value_parsed, surprise, surprise_pct,
-                 comparison_method)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 comparison_method, forecast_value_parsed, forecast_method, forecast_verdict)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -31,6 +65,9 @@ def save_comparison(conn, result) -> int:
                 result.surprise,
                 result.surprise_pct,
                 result.comparison_method,
+                result.forecast_value_parsed,
+                result.forecast_method,
+                result.forecast_verdict,
             ),
         )
         comparison_id = cur.fetchone()[0]

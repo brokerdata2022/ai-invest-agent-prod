@@ -35,9 +35,11 @@ from expectations.comparison_methods import (  # noqa: E402
     COMPARISON_METHOD,
     RAW_UNIT_SCALE,
     REQUIRED_OBSERVATIONS,
+    compare_to_market,
     compute_actual,
+    forecast_in_comparison_units,
 )
-from expectations._db import save_comparison  # noqa: E402
+from expectations._db import fetch_prerelease_forecast, save_comparison  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -55,6 +57,12 @@ class ComparisonResult:
     surprise: float
     surprise_pct: Optional[float]
     comparison_method: str
+    # ТРИ ЧИСЛА ПОРУЧ (2026-10-15): прогноз агента в тих самих
+    # одиницях, що actual_value, і хто був ближчий до факту — ми чи
+    # ринок. None = прогнозу на цей реліз не було (не «помилився»).
+    forecast_value_parsed: Optional[float] = None
+    forecast_method: Optional[str] = None
+    forecast_verdict: Optional[str] = None
 
 
 def compare_one(conn, entry: dict) -> Optional[ComparisonResult]:
@@ -94,6 +102,36 @@ def compare_one(conn, entry: dict) -> Optional[ComparisonResult]:
     surprise = actual - expected_scaled
     surprise_pct = (surprise / abs(expected_scaled) * 100) if expected_scaled else None
 
+    # --- прогноз АГЕНТА на цей самий реліз (2026-10-15) ---
+    #
+    # Третя точка зору поруч із фактом і ринковим очікуванням. Доти
+    # прогноз жив в окремому повідомленні, і порівняти «ми проти
+    # консенсусу» можна було лише SQL-запитом.
+    observed_date = observations[0]["observed_at"]
+    forecast_row = fetch_prerelease_forecast(conn, entry["source"], metric_id, observed_date)
+    forecast_parsed = None
+    forecast_method = None
+    if forecast_row is not None:
+        forecast_raw, forecast_method = forecast_row
+        # Прогноз — РІВЕНЬ, порівняння — у одиницях ринкового квотування,
+        # тож переводимо тим самим методом, що й факт.
+        forecast_parsed = forecast_in_comparison_units(method, forecast_raw, observations)
+        if forecast_parsed is None:
+            logger.info(
+                "%s: прогноз %s не переводиться в одиниці методу %s — пропущено",
+                metric_id, forecast_raw, method,
+            )
+            forecast_method = None
+
+    verdict = compare_to_market(actual, forecast_parsed, expected_scaled)
+    if forecast_parsed is not None:
+        logger.info(
+            "%s: агент %.4f | ринок %.4f | факт %.4f -> %s",
+            metric_id, forecast_parsed, expected_scaled, actual, verdict,
+        )
+    else:
+        logger.info("%s: прогнозу агента на цей реліз не було", metric_id)
+
     return ComparisonResult(
         release_log_id=entry["id"],
         source=entry["source"],
@@ -105,6 +143,9 @@ def compare_one(conn, entry: dict) -> Optional[ComparisonResult]:
         surprise=surprise,
         surprise_pct=surprise_pct,
         comparison_method=method,
+        forecast_value_parsed=forecast_parsed,
+        forecast_method=forecast_method,
+        forecast_verdict=verdict,
     )
 
 

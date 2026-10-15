@@ -1377,3 +1377,33 @@ ALTER TABLE raw_observations SET (
 -- Стиснуті чанки читаються, просто повільніше, тож запас у 30 днів
 -- тримає всю "гарячу" аналітику на нестиснутих даних.
 SELECT add_compression_policy('raw_observations', INTERVAL '30 days', if_not_exists => TRUE);
+
+-- ============================================================
+-- ТРИ ЧИСЛА ПОРУЧ (2026-10-15, рішення користувача)
+-- ============================================================
+-- Прогноз агента, факт і ринкове очікування жили в РІЗНИХ
+-- повідомленнях: `forecast_notify.py` шле прогноз, `expectations_notify.py`
+-- — факт проти очікування. Побачити «агент побив naive, але програв
+-- консенсусу» можна було лише SQL-запитом.
+--
+-- ЧОМУ ЦЕ НЕ ПРОСТО ФОРМАТУВАННЯ. Прогноз лежить у `metric_forecasts`
+-- РІВНЕМ (cpi 334.9), а порівняння з очікуванням — у m/m % (0.6).
+-- Щоб три числа були зрівнянні, прогноз треба прогнати ТИМ САМИМ
+-- методом, що й факт (`comparison_methods.compute_actual`), тож
+-- обчислення належить шару аналізу, а не reporting/.
+--
+-- ЖИВИЙ УРОК, через який це взагалі робиться кодом: вручну я взяв
+-- прогноз cpi 337.1 (створений 14.10) як прогноз вересневого релізу —
+-- а в нього `based_on_observed_at = 2026-09-01`, тобто він зроблений
+-- ПІСЛЯ релізу й прогнозує ЖОВТЕНЬ. Правильний рядок — 334.9 від
+-- 06.10 на серпневих даних. Вибір прогнозу неочевидний, і саме тому
+-- він тепер у коді з умовою `based_on_observed_at < observed_at`.
+ALTER TABLE expectation_comparisons
+    ADD COLUMN IF NOT EXISTS forecast_value_parsed NUMERIC;
+ALTER TABLE expectation_comparisons
+    ADD COLUMN IF NOT EXISTS forecast_method TEXT;
+-- closer_than_market | farther_than_market | tie — хто був ближчий до
+-- факту. Вердикт зберігається, а не рахується в reporting/: там лише
+-- форматування (reporting/CLAUDE.md).
+ALTER TABLE expectation_comparisons
+    ADD COLUMN IF NOT EXISTS forecast_verdict TEXT;

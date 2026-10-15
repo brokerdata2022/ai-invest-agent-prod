@@ -112,3 +112,64 @@ def compute_actual(method: str, observations: list[dict]) -> Optional[float]:
         if year_ago == 0:
             return None
         return (latest / year_ago - 1) * 100
+
+# ============================================================
+# ТРИ ЧИСЛА ПОРУЧ: прогноз агента в одиницях порівняння
+# ============================================================
+
+CLOSER = "closer_than_market"
+FARTHER = "farther_than_market"
+TIE = "tie"
+
+
+def forecast_in_comparison_units(
+    method: str, forecast_value: float, observations: list[dict]
+) -> Optional[float]:
+    """Прогноз агента, переведений у ТІ САМІ одиниці, що `actual_value`.
+
+    **Навіщо.** Прогноз лежить у `metric_forecasts` РІВНЕМ (cpi 334.9),
+    а порівняння з ринковим очікуванням — у тих одиницях, якими ринок
+    квотує показник (m/m % для cpi). Без переведення три числа поруч
+    незрівнянні.
+
+    **Як.** Тим самим `compute_actual()`, що порахував факт — прогноз
+    підставляється на місце НАЙНОВІШОГО спостереження, а історія
+    (`observations[1:]`) лишається та сама. Це не паралельна
+    арифметика, а той самий код: інакше рано чи пізно формули
+    розійшлись би, і «агент проти ринку» порівнювало б різні величини
+    (той самий урок, що `feedback_measurement_must_match_production`).
+
+    `observations` — як повертає `common/db.py:fetch_recent()`,
+    найновіше перше, вже з РЕЛІЗНИМ значенням на позиції 0.
+    """
+    if not observations:
+        return None
+    substituted = [{"value": forecast_value}] + list(observations[1:])
+    return compute_actual(method, substituted)
+
+
+def compare_to_market(
+    actual: float, forecast: Optional[float], expected: float
+) -> Optional[str]:
+    """Хто був ближчий до факту — прогноз агента чи ринкове очікування.
+
+    `None`, якщо прогнозу не було: це НЕ «агент програв», це
+    відсутність твердження, і плутати їх означає псувати статистику
+    (той самий принцип, що `no_claim` у журналі наслідків).
+    """
+    if forecast is None:
+        return None
+    agent_error = abs(actual - forecast)
+    market_error = abs(actual - expected)
+
+    # Порівняння з допуском, а не `==`. Живий приклад із тесту:
+    # |1.0 - 0.9| = 0.09999999999999998, а |1.1 - 1.0| =
+    # 0.10000000000000009 — математично рівні помилки, але через
+    # подвійну точність "нічия" не визначалась би майже ніколи, а
+    # вибір "ближче чи далі" вирішував шум останнього біта.
+    # Допуск відносний, бо показники різного масштабу: m/m % (0.6) і
+    # рівень зайнятості (158 000).
+    scale = max(1.0, abs(agent_error), abs(market_error))
+    if abs(agent_error - market_error) <= 1e-9 * scale:
+        return TIE
+    return CLOSER if agent_error < market_error else FARTHER
