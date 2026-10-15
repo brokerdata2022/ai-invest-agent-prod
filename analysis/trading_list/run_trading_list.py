@@ -62,6 +62,7 @@ from trading_list._db import (  # noqa: E402
     fetch_stock_universe,
     fetch_synthesis_catalysts,
     fetch_trusted_forecasts,
+    fetch_upcoming_earnings,
     fetch_upcoming_releases,
     fetch_watchlist_universe,
     save_trading_list,
@@ -279,6 +280,35 @@ def collect_catalysts(conn) -> tuple[dict[str, list[CatalystHit]], list[Catalyst
             f"новина ({news['source_count']} джерел): {news['summary'][:120]}",
             detail=news["summary"], when=str(news["source_count"]),
         ), f"news:{news['asset_id']}:{news['summary'][:40]}")
+
+    # --- ЗВІТНІСТЬ КОМПАНІЇ (власна подія тикера, не макрофон) ---
+    #
+    # Додано 2026-10-15. Доти дат звітності в агента не було взагалі:
+    # EPS використовувався як цифра в Tier B, але "коли вийде наступний
+    # звіт" не знав ніхто. Живий замір того дня: 252 з 512 наших
+    # тикерів звітують у найближчі 14 днів — тобто половина універсуму
+    # мала розкладений наперед каталізатор, який нікуди не підключався.
+    #
+    # Вага = CATALYST_WEIGHT_EARNINGS (0.7, як у новини), і хіт
+    # СВІДОМО не приглушується MACRO_DAMPING: приглушення існує для
+    # подій, що НЕ різнять активи (глобальний макрореліз), а звіт
+    # стосується рівно одного тикера. Напрямок — neutral: дата відома,
+    # результат ні (той самий принцип, що release_upcoming).
+    for earnings in fetch_upcoming_earnings(conn, config.CATALYST_EARNINGS_WINDOW_DAYS):
+        ticker = earnings["ticker"]
+        when = earnings["report_date"].strftime("%d.%m")
+        eps = earnings["eps_forecast"]
+        text = (
+            f"звіт {ticker} {when}"
+            + (f" ({earnings['report_time']})" if earnings["report_time"] else "")
+            + (f", прогноз EPS {eps}" if eps is not None else "")
+        )
+        add(ticker, CatalystHit(
+            "earnings", config.CATALYST_WEIGHT_EARNINGS, "neutral", text,
+            metric_id=ticker,
+            detail=f"прогноз EPS {eps}" if eps is not None else "",
+            when=when,
+        ), f"earnings:{ticker}:{earnings['report_date']}")
 
     # --- синтез ціна↔новини ---
     for syn in fetch_synthesis_catalysts(

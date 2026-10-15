@@ -128,3 +128,77 @@ class CoinGeckoAdapter(BaseAdapter):
         ]
         records.sort(key=lambda r: r.observed_at)
         return records
+
+
+# Ціна для ЗВІРКИ (не для збору): `METRICS` вище веде btc/eth/sol у
+# `market_caps`, бо ціну спота збирає Binance. Для звірки джерел
+# (2026-10-15) потрібна саме ціна з НЕЗАЛЕЖНОГО джерела — крипто-спот
+# доти стояв на одному Binance, тобто принцип "правда це згода джерел"
+# його не торкався.
+PRICE_COIN_IDS: dict[str, str] = {
+    "btc": "bitcoin",
+    "eth": "ethereum",
+    "sol": "solana",
+}
+
+
+def latest_price(asset_id: str, session: Optional[requests.Session] = None) -> Optional[Decimal]:
+    """Остання ціна активу в USD з CoinGecko, або None.
+
+    `None` замість винятку: звірка не повинна падати через троттл
+    публічного API (CoinGecko без ключа — 10-30 запитів/хв), інакше
+    один 429 забрав би всю звірку (той самий урок, що тихий бан GDELT
+    — лише в дзеркальному боці: тут падати теж не можна, але причину
+    видно в лозі)."""
+    coin_id = PRICE_COIN_IDS.get(asset_id)
+    if coin_id is None:
+        return None
+    try:
+        response = (session or requests.Session()).get(
+            COINGECKO_MARKET_CHART_URL.format(coin_id=coin_id),
+            params={"vs_currency": "usd", "days": 1},
+            timeout=30,
+        )
+        response.raise_for_status()
+        prices = response.json().get("prices") or []
+        if not prices:
+            return None
+        return Decimal(str(prices[-1][1]))
+    except Exception:
+        logger.warning("CoinGecko: ціна %s недоступна", asset_id, exc_info=True)
+        return None
+
+
+def prices_by_date(
+    asset_id: str, days: int = 7, session: Optional[requests.Session] = None
+) -> dict:
+    """{дата: ціна в USD} — для звірки на ОДНУ дату, не «наше старе
+    проти їхнього свіжого» (живий дефект 2026-10-15, той самий, що в
+    `yahoo_chart_adapter.closes_by_date`).
+
+    CoinGecko у режимі `days>1` віддає денні зрізи; беремо ОСТАННІЙ
+    зріз у межах кожної доби UTC — саме з ним порівнюється наше
+    денне закриття."""
+    coin_id = PRICE_COIN_IDS.get(asset_id)
+    if coin_id is None:
+        return {}
+    try:
+        response = (session or requests.Session()).get(
+            COINGECKO_MARKET_CHART_URL.format(coin_id=coin_id),
+            params={"vs_currency": "usd", "days": days},
+            timeout=30,
+        )
+        response.raise_for_status()
+        points = response.json().get("prices") or []
+    except Exception:
+        logger.warning("CoinGecko: ряд цін %s недоступний", asset_id, exc_info=True)
+        return {}
+
+    series: dict = {}
+    for stamp_ms, price in points:
+        day = datetime.fromtimestamp(stamp_ms / 1000, tz=timezone.utc).date()
+        try:
+            series[day] = Decimal(str(price))
+        except (InvalidOperation, ValueError):
+            continue
+    return series

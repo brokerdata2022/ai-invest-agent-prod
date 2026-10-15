@@ -119,7 +119,7 @@ docker compose up -d --build
 |---|---|
 | `db` | PostgreSQL 16 + TimescaleDB, порт тільки на `127.0.0.1` |
 | `app` | контейнер із кодом; `sleep infinity`, для ручних команд |
-| `scheduler` | APScheduler — виконує 48 джоб, `restart: unless-stopped` |
+| `scheduler` | APScheduler — виконує 54 джоби, `restart: unless-stopped` |
 
 Перевірити:
 
@@ -172,7 +172,7 @@ bash scripts/restore_db.sh
 docker compose exec app pytest -q
 ```
 
-Очікується **1374 passed**. Ключі для цього не потрібні — тести
+Очікується **1442 passed**. Ключі для цього не потрібні — тести
 перевіряють код і не торкаються ні мережі, ні бази, тож проходять і
 на незаповненому `.env`. Якщо падають —
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
@@ -183,7 +183,7 @@ docker compose exec app pytest -q
 docker compose exec app python orchestration/register_telegram_commands.py
 ```
 
-Наповнює «/»-меню бота назвами й описами всіх 48 джоб. Разова дія
+Наповнює «/»-меню бота назвами й описами всіх 54 джоб. Разова дія
 (повторити лише після додавання нової джоби).
 
 ### Крок 7. Засіяти календар релізів
@@ -203,7 +203,7 @@ docker compose exec app python orchestration/run_job.py refresh_calendar
 docker compose logs --tail 60 scheduler
 ```
 
-У логах мусить бути перелік 48 джоб із часом наступного запуску.
+У логах мусить бути перелік 54 джоб із часом наступного запуску.
 
 Перший живий звіт — найближчою Telegram-джобою за розкладом. Не чекати:
 
@@ -215,7 +215,7 @@ docker compose exec app python orchestration/run_job.py notify_watchlist
 
 ### Після відновлення
 
-**Усі 48 джоб уже працюють** — агент повноцінний, нічого доналаштовувати
+**Усі 54 джоби вже працюють** — агент повноцінний, нічого доналаштовувати
 не треба. Переконатися:
 
 ```bash
@@ -389,7 +389,7 @@ docker compose exec app python data-ingestion/apply_schema.py
 docker compose exec app pytest -q
 ```
 
-Очікувано: `1374 passed` за ~10-15 секунд.
+Очікувано: `1442 passed` за ~10-15 секунд.
 
 > **Якщо оновлюєтесь із версії до 2026-10-15** — зверніть увагу:
 > раніше цей самий `pytest` **виконував пʼять джоб по-справжньому**.
@@ -401,7 +401,18 @@ docker compose exec app pytest -q
 > календаря. Виправлено; ознака, що нова версія справді стала —
 > `pytest` триває секунди, а не хвилину-дві.
 
-### 6. Переконатися, що планувальник узявся до роботи
+### 6. Перереєструвати Telegram-команди, якщо в оновленні є НОВІ джоби
+
+```bash
+docker compose exec app python orchestration/register_telegram_commands.py
+```
+
+Наповнює «/»-меню бота назвами й описами джоб. Потрібно лише коли
+оновлення додало джоби — наприклад, у версії 2026-10-15 їх стало 54
+замість 48 (самоконтроль і календар звітності). Без цього нові
+команди все одно працюють, просто не підказуються в меню.
+
+### 7. Переконатися, що планувальник узявся до роботи
 
 ```bash
 docker compose logs --tail 20 scheduler
@@ -418,7 +429,7 @@ docker compose exec db psql -U invest_agent -d invest_agent -c \
 `age` більше 10 хвилин означає, що планувальник не працює — далі
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
-### 7. Прогнати одну джобу вручну
+### 8. Прогнати одну джобу вручну
 
 ```bash
 docker compose exec app python orchestration/run_job.py crypto_screening_daily

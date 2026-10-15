@@ -57,6 +57,69 @@ docker compose exec db psql -U invest_agent -d invest_agent -c \
 
 ---
 
+## Самоконтроль агента (з 2026-10-15)
+
+Три механізми, які агент застосовує до СЕБЕ. Усі троє мовчать, коли
+все гаразд — бо перевірка, що щодня звітує «усе добре», стає шумом і
+її перестають читати.
+
+### Чи виводи не виродились — `output_health`, щодня 22:30
+
+Домінантний клас дефектів цього агента — не падіння, а виродження:
+джоба відпрацювала, рядки записала, і вони нічого не значать (був
+живий випадок, коли одне поле дорівнювало 8 у ВСІХ рядках, бо пошук
+дублікатів не знаходив їх узагалі). Перевірка міряє кількість рядків,
+**різноманіття значень** і частку порожніх обов'язкових полів по 7
+таблицях.
+
+Telegram приходить **лише при зміні стану** (ok→fail або fail→ok).
+Подивитись історію:
+
+```bash
+docker compose exec db psql -U invest_agent -d invest_agent -c \
+  "select check_name, status, detail, checked_at
+     from output_health_checks order by checked_at desc limit 14"
+```
+
+Після свіжого розгортання кілька перевірок можуть один раз сказати
+`fail` із текстом «джоба перестала писати» — це означає лише, що
+відповідні джоби ще не відпрацювали у своєму вікні. Наступного дня
+прийде «✅ Відновилось».
+
+### Чи агент був правий — `evaluate_outcomes` + `notify_outcomes`
+
+Щодня о 06:05 агент бере свої рішення, старші за 7 днів, дивиться
+фактичний рух активу й ставить вердикт. Щопонеділка о 09:30 надсилає
+відсоток влучань по видах списків.
+
+```bash
+docker compose exec db psql -U invest_agent -d invest_agent -c \
+  "select decision_kind,
+          count(*) filter (where verdict='correct')   as correct,
+          count(*) filter (where verdict='incorrect') as incorrect,
+          round(avg(realized_pct) filter (where verdict in ('correct','incorrect')),2) as avg_move
+     from decision_outcomes group by 1 order by 1"
+```
+
+**Як це читати.** Рух менший за ±2% і спостереження без напрямку
+(`watch`/`unclear`) у відсоток не входять — інакше hit rate показував
+би ~50% на шумі. Одне вікно — це один режим ринку: у падаючому тижні
+напрямок «вгору» програє незалежно від якості відбору, тому дивитись
+варто ДИНАМІКУ між тижнями, а не абсолютне число. Це вимір якості
+інформації, не торгівлі: ні позицій, ні цін виконання, ні P&L тут
+немає.
+
+### Чи ціни правдиві — `quotes_crosscheck`, щодня 05:20
+
+Котирування топових за скором акцій звіряються з Yahoo, а BTC/ETH/SOL —
+із CoinGecko, **за ту саму дату**. Сирих даних не змінює (правило
+append-only), сповіщає лише при розбіжності понад допуск. Привід, через
+який це з'явилось: одне офіційне джерело колись давало ціну Brent на
+33% вище за справжню, і контролі свіжості цього не бачили — вони
+відповідають про ЧАС, не про ПРАВИЛЬНІСТЬ.
+
+---
+
 ## Резервне копіювання
 
 ### Зняти резерв
@@ -128,7 +191,7 @@ bash scripts/restore_db.sh ~/резерв-2026-10-13.sql.gz
 
 ## Керування через Telegram
 
-Кожна з 48 джоб має однойменну команду бота — повний список з описами
+Кожна з 54 джоб має однойменну команду бота — повний список з описами
 видає `/help`. Найуживаніші:
 
 | Команда | Що робить |
@@ -167,7 +230,7 @@ docker compose exec app python orchestration/register_telegram_commands.py
 
 ## Розклад
 
-**48 джоб**, часовий пояс `Europe/Kyiv`. Єдине місце для зміни
+**54 джоби**, часовий пояс `Europe/Kyiv`. Єдине місце для зміни
 періодичності — `orchestration/schedule.py` (запис джоби може мати
 власний `timezone` — для привʼязки до відкриття конкретного ринку).
 Що саме робить кожна — [docs/jobs.md](docs/jobs.md).
@@ -185,8 +248,11 @@ docker compose exec app python orchestration/run_job.py --list
 | кожні 2 год | збір новин з RSS |
 | 0/6/12/18 | новини watchlist, аналіз новин, крипто-скринінг |
 | 3:00 | ціни всього S&P 500 |
-| 4:30 / 4:35 | прибирання логів (>14 днів) і новин (>48 год) |
+| 4:30 / 4:35 / 4:40 | прибирання логів (>14 днів), новин (>48 год) і похідних таблиць |
+| 4:50 | календар звітності компаній (Nasdaq) |
 | 5:00 / 5:10 | скринінг акцій → звіт |
+| 5:20 | звірка котирувань із другим джерелом |
+| 6:05 | журнал наслідків: що сталось із рішеннями агента |
 | 6:00 | календар релізів, ціни watchlist, синтез новин |
 | 7:00 | огляд календаря (пн-пт), список для торгів |
 | 8:20 / 9:20 / 9:50 | синтез ринку: Європа / Азія / США |
@@ -195,6 +261,8 @@ docker compose exec app python orchestration/run_job.py --list
 | 16:00 / 16:30 | звірка FRED↔BLS, синтез ставки |
 | 17:00 | ціни watchlist (вечірній зріз) |
 | 20:00 | щоденний дайджест |
+| 22:30 | детектор вироджених виводів (Telegram лише при зміні стану) |
+| пн 9:30 | відсоток влучань рішень за тиждень |
 | нд 8:00 | фундаментал усього S&P 500 |
 | сб 9:00 | тези зі звітів 10-K/10-Q |
 | 1-го числа 7:00 | страховий перезбір усіх показників |
@@ -274,35 +342,43 @@ docker compose exec db psql -U invest_agent -d invest_agent -c \
      from timescaledb_information.hypertables"
 ```
 
-Що зростає й чи можна чистити:
+Що зростає й що з цим робить агент САМ (з 2026-10-15):
 
-| Таблиця | Зростання | Чистити? |
+| Таблиця | Зростання | Хто прибирає |
 |---|---|---|
-| `raw_observations` | ~100–200 МБ/міс | **ніколи** (правило 4) |
-| `llm_call_log` | ~10–30 МБ/міс | можна, старші за кілька місяців — але спершу знайте, що втрачаєте аудит |
-| `raw_news` | стабільно ~3 МБ | само, 48 год |
-| решта | десятки МБ | само або незначне |
+| `raw_observations` | ~5 200 рядків/добу (ф'ючерси — найбільше) | **ніколи не видаляється** — лише СТИСКАЄТЬСЯ політикою TimescaleDB із 30-го дня. Зміряно на живому чанку: 3280 кБ → 464 кБ (**7.1×**) |
+| `llm_call_log` | ~10-30 МБ/міс | джоба `prune_derived`: старші за 120 днів і **без посилань** із 11 таблиць-результатів |
+| `news_consolidated` | тексти, 3×/добу | `prune_derived`, 30 днів |
+| знімкові таблиці (`trading_list`, `screening_results`, …) | десятки МБ | `prune_derived`, 180 днів |
+| `raw_news` | стабільно ~3 МБ | `prune_raw_news`, 48 год |
 
-Якщо диск тисне, перший кандидат — старі рядки `llm_call_log`, **на
-які ніхто не посилається**:
+Ручного SQL для цього більше не потрібно. Перевірити, що прибирання
+працює:
 
 ```bash
-docker compose exec db psql -U invest_agent -d invest_agent -c "
-  delete from llm_call_log l
-   where l.created_at < now() - interval '90 days'
-     and not exists (select 1 from news_synthesis        x where x.llm_call_id=l.id)
-     and not exists (select 1 from market_synthesis      x where x.llm_call_id=l.id)
-     and not exists (select 1 from candidate_assets      x where x.llm_call_id=l.id)
-     and not exists (select 1 from expectation_synthesis x where x.llm_call_id=l.id)
-     and not exists (select 1 from metric_forecasts      x where x.llm_call_id=l.id)
-     and not exists (select 1 from news_consolidated     x where x.llm_call_id=l.id)
-     and not exists (select 1 from calendar_outlook      x where x.llm_call_id=l.id)
-     and not exists (select 1 from fundamental_analysis  x where x.llm_call_id=l.id)
-     and not exists (select 1 from news_analysis         x where x.llm_call_id=l.id)"
+docker compose logs --tail 30 scheduler | grep prune_derived
 ```
 
-`raw_observations` не чистити **ніколи** — навіть якщо джерело
-змінилось або зникло. Тільки архівувати (резервом).
+Вікна свідомо широкі, тож на свіжій базі джоба видаляє НУЛЬ рядків —
+це гейт на майбутнє, не разове прибирання. Пороги — `config.py`,
+розділ 24 (`DERIVED_RETENTION_DAYS`).
+
+**Чого прибирання не торкається ніколи:** `raw_observations` (сирі
+зібрані дані), `backtest_verdicts` (без них вибір «ШІ чи naive» тихо
+падає на naive по всіх показниках), `metric_forecasts` і
+`decision_outcomes` (вимірювана історія ЯКОСТІ агента),
+`earnings_calendar`, `release_log`, `watchlist_assets`, `sources`.
+Перелік стережеться тестом — випадково додати туди таблицю не вийде.
+
+Перевірити стиснення вручну:
+
+```bash
+docker compose exec db psql -U invest_agent -d invest_agent -c \
+  "select count(*) filter (where is_compressed) as compressed,
+          count(*) as chunks
+     from timescaledb_information.chunks
+    where hypertable_name = 'raw_observations'"
+```
 
 ---
 
@@ -378,4 +454,4 @@ diff /tmp/before.txt /tmp/after.txt
 ```
 
 Вивід **не змінився** там, де мусив, — або всі значення **однакові** —
-це і є дефект, навіть якщо всі 1374 тести зелені.
+це і є дефект, навіть якщо всі 1442 тести зелені.

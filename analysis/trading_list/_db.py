@@ -94,6 +94,29 @@ def fetch_watchlist_universe(conn) -> list[dict]:
         return _dicts(cur)
 
 
+def fetch_upcoming_earnings(conn, days: int) -> list[dict]:
+    """Звіти компаній, що виходять у найближчі `days` днів
+    (`earnings_calendar`, джерело — Nasdaq).
+
+    Чому це тут, а не серед релізів: макрореліз стосується ВСЬОГО ринку
+    й не різнить активи (тому приглушується `MACRO_DAMPING`), а звіт
+    компанії — подія САМОГО тикера, як і новина про нього. Додано
+    2026-10-15: доти акція мала прицільну подію лише за наявності
+    новини (зміряно 13.10 — 9 кандидатів із 29)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT ticker, report_date, report_time, eps_forecast
+            FROM earnings_calendar
+            WHERE report_date >= current_date
+              AND report_date <= current_date + %s
+            ORDER BY report_date, ticker
+            """,
+            (days,),
+        )
+        return _dicts(cur)
+
+
 # ============================================================
 # ЦІНИ ДЛЯ ТРЕНДУ
 # ============================================================

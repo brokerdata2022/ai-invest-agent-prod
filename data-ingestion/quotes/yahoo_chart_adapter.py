@@ -235,3 +235,84 @@ def latest_close(metric_id: str, session: Optional[requests.Session] = None) -> 
     records = YahooChartAdapter(metric_id, session=session).collect(limit=5)
     newest = max(records, key=lambda r: r.observed_at)
     return newest.observed_at, newest.value
+
+
+def latest_close_for_symbol(
+    symbol: str, session: Optional[requests.Session] = None
+) -> Optional[tuple]:
+    """(дата, ціна) за САМИМ символом Yahoo, без прив'язки до `SYMBOLS`.
+
+    Потрібна для звірки КОТИРУВАНЬ АКЦІЙ (`monitoring/crosscheck_quotes.py`,
+    2026-10-15): `SYMBOLS` — це 11 watchlist-активів, а звіряти треба
+    тикери S&P, яких у цій мапі немає й не має бути (їх 500+, і вони
+    приходять зі скринінгу, не з конфіга).
+
+    `None` замість винятку: звірка 30 тикерів не повинна падати цілком
+    через один делістингований символ — відсутнє значення просто не
+    потрапить у вердикт (`consensus.py` сам скаже "звірити ні з чим").
+    """
+    try:
+        response = (session or requests.Session()).get(
+            CHART_URL.format(symbol=symbol),
+            params={"range": "5d", "interval": "1d"},
+            headers=HEADERS,
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        result = payload["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        closes = result["indicators"]["quote"][0]["close"]
+    except Exception:
+        logger.warning("Yahoo chart: %s не вдалось отримати", symbol, exc_info=True)
+        return None
+
+    for ts, close in sorted(zip(timestamps, closes), key=lambda pair: pair[0], reverse=True):
+        if close is None:
+            continue
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc).date(), Decimal(str(close))
+        except (InvalidOperation, ValueError):
+            continue
+    return None
+
+
+def closes_by_date(
+    symbol: str, session: Optional[requests.Session] = None, range_: str = "1mo"
+) -> dict:
+    """{дата: ціна закриття} за САМИМ символом Yahoo.
+
+    Чому мапа, а не «остання ціна» (живий дефект 2026-10-15): перший
+    варіант звірки котирувань порівнював НАШЕ значення за 09.10 із
+    yahoo-значенням за 15.10 і давав розкид 2-5% — тобто міряв
+    ЗАСТАРІЛІСТЬ нашого зрізу, а не незгоду джерел. Це та сама помилка,
+    через яку звірка BLS спершу «знайшла» розбіжність 0.25%: треба
+    брати ТОЙ САМИЙ ряд і ТУ САМУ дату (CLAUDE.md).
+
+    Порожній дікт замість винятку — звірка 30 тикерів не має падати
+    через один делістингований символ."""
+    try:
+        response = (session or requests.Session()).get(
+            CHART_URL.format(symbol=symbol),
+            params={"range": range_, "interval": "1d"},
+            headers=HEADERS,
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        result = payload["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        closes = result["indicators"]["quote"][0]["close"]
+    except Exception:
+        logger.warning("Yahoo chart: %s не вдалось отримати", symbol, exc_info=True)
+        return {}
+
+    series: dict = {}
+    for ts, close in zip(timestamps, closes):
+        if close is None:
+            continue
+        try:
+            series[datetime.fromtimestamp(ts, tz=timezone.utc).date()] = Decimal(str(close))
+        except (InvalidOperation, ValueError):
+            continue
+    return series

@@ -219,6 +219,36 @@ def test_catalyst_news_not_damped_for_stocks():
     assert plain == as_stock
 
 
+def _earnings() -> CatalystHit:
+    return CatalystHit(
+        "earnings", config.CATALYST_WEIGHT_EARNINGS, "neutral", "звіт AAPL 22.10"
+    )
+
+
+def test_catalyst_earnings_not_damped():
+    """Звіт компанії — подія САМОГО тикера, не макрофон. Приглушення
+    існує для подій, що НЕ різнять активи (глобальний макрореліз), тож
+    на звітність воно поширюватись не має (2026-10-15)."""
+    earnings, _ = catalyst_score([_earnings()], is_stock=True)
+    news, _ = catalyst_score([_news()], is_stock=True)
+    assert earnings == news
+
+
+def test_catalyst_earnings_outweighs_bare_macro():
+    """Саме це й було дірою: без дат звітності акція стояла на
+    спільному макрофоні (0.26), і нічого не різнило її від 214 інших."""
+    with_earnings, _ = catalyst_score([_earnings()], is_stock=True)
+    macro_only, _ = catalyst_score([_release_high()], is_stock=True)
+    assert with_earnings > macro_only
+
+
+def test_catalyst_earnings_plus_macro_is_full():
+    """Звіт + макрореліз = повний каталізатор, як і новина + реліз:
+    знаменник нормування той самий."""
+    score, _ = catalyst_score([_earnings(), _release_high()], is_stock=True)
+    assert score == Decimal("1")
+
+
 # --- quality_score ---------------------------------------------------
 
 

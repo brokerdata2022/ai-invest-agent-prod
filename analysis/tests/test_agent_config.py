@@ -211,3 +211,73 @@ def test_single_config_has_no_module_level_siblings():
     analysis_dir = Path(__file__).resolve().parent.parent
     strays = sorted(p.relative_to(analysis_dir) for p in analysis_dir.glob("*/config.py"))
     assert not strays, f"зʼявились модульні конфіги: {strays}"
+
+
+# ============================================================
+# Прибирання похідних — захист правил 5 і 6
+# ============================================================
+
+# Таблиці, видалення яких тихо зламало б агента або порушило критичні
+# правила. Тест існує, бо `DERIVED_RETENTION_DAYS` редагує людина, а
+# ціна помилки тут асиметрична: зайве вікно нічого не ламає, зайва
+# таблиця — ламає назавжди.
+PROTECTED_FROM_PRUNING = (
+    # Правило 6: сирі зібрані дані append-only назавжди (лише стиснення)
+    "raw_observations",
+    # Без вердиктів бектесту method_selector молча падає на naive по всіх показниках
+    "backtest_verdicts",
+    # Вимірювана історія ЯКОСТІ агента — те єдине, чим перевіряються ваги
+    "metric_forecasts",
+    "decision_outcomes",
+    # Налаштовано людиною через Telegram, у коді цього немає
+    "watchlist_assets",
+    "sources",
+    "release_log",
+    "earnings_calendar",
+)
+
+
+def test_pruning_never_touches_protected_tables():
+    import config as cfg
+
+    for table in PROTECTED_FROM_PRUNING:
+        assert table not in cfg.DERIVED_RETENTION_DAYS, (
+            f"{table} не можна прибирати за розкладом — див. коментар "
+            f"PROTECTED_FROM_PRUNING"
+        )
+
+
+def test_llm_call_referencing_tables_has_no_duplicates():
+    """Хибно КОРОТКИЙ перелік видалив би промпт під живим висновком і
+    тихо порушив правило 5; дублікати ж роздувають UNION ALL."""
+    import config as cfg
+
+    tables = cfg.LLM_CALL_REFERENCING_TABLES
+    assert len(tables) == len(set(tables))
+
+
+def test_retention_windows_are_positive_integers():
+    import config as cfg
+
+    for table, days in cfg.DERIVED_RETENTION_DAYS.items():
+        assert isinstance(days, int) and days > 0, f"{table}: {days!r}"
+    assert cfg.LLM_CALL_LOG_RETENTION_DAYS > 0
+
+
+def test_output_health_checks_are_well_formed():
+    """Перевірка описана ДАНИМИ, тож структуру стереже тест, а не
+    падіння джоби о 22:30."""
+    import config as cfg
+
+    required_keys = {
+        "name", "table", "time_column", "window_hours", "min_rows",
+        "vary", "min_distinct", "required", "max_null_share",
+    }
+    names = set()
+    for check in cfg.OUTPUT_HEALTH_CHECKS:
+        assert required_keys <= set(check), check.get("name")
+        assert check["name"] not in names, f"дубль перевірки {check['name']}"
+        names.add(check["name"])
+        assert 0.0 <= check["max_null_share"] <= 1.0
+        assert isinstance(check["vary"], tuple)
+        assert isinstance(check["required"], tuple)

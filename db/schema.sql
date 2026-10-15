@@ -1250,3 +1250,130 @@ CREATE TABLE IF NOT EXISTS policy_rate_synthesis (
     notified_at       TIMESTAMPTZ,
     UNIQUE (bank, meeting_at)
 );
+
+-- ============================================================
+-- ЖУРНАЛ НАСЛІДКІВ (2026-10-15, рішення користувача)
+-- ============================================================
+-- Агент видавав списки, вердикти й напрямки — і НІКОЛИ не перевіряв,
+-- що з них вийшло. Постфактум-оцінка існувала лише для прогнозів
+-- показників (`backtest_verdicts`, ШІ проти naive); LONG/SHORT, список
+-- торгів, новачки й напрямки синтезів не мали її взагалі. Тобто ваги й
+-- пороги в `config.py` лишались припущеннями, які нічим не перевірити.
+--
+-- Таблиця НЕ має FK на таблиці рішень: `decision_id` — слабке
+-- посилання, бо знімкові таблиці підлягають прибиранню
+-- (`prune_derived`), а наслідок має його переживати. Тому ціна й
+-- вердикт копіюються сюди значеннями.
+CREATE TABLE IF NOT EXISTS decision_outcomes (
+    id                 BIGSERIAL PRIMARY KEY,
+    decision_kind      TEXT NOT NULL,     -- trading_list | crypto_long | crypto_watch | candidate
+    decision_id        BIGINT NOT NULL,   -- id рядка в таблиці-джерелі (слабке посилання)
+    asset_key          TEXT NOT NULL,     -- asset_id/ticker/symbol як його знає джерело
+    asset_class        TEXT NOT NULL,     -- stock | crypto | commodity | fx
+    direction          TEXT NOT NULL,     -- up | down | long | short | watch | unclear
+    decided_at         TIMESTAMPTZ NOT NULL,
+    horizon_days       INTEGER NOT NULL,
+    price_at_decision  NUMERIC,
+    price_at_eval      NUMERIC,
+    realized_pct       NUMERIC,
+    verdict            TEXT NOT NULL,     -- correct | incorrect | flat | unavailable
+    detail             TEXT,
+    evaluated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    notified_at        TIMESTAMPTZ,
+    UNIQUE (decision_kind, decision_id, horizon_days)
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_outcomes_kind_eval
+    ON decision_outcomes (decision_kind, evaluated_at DESC);
+
+-- ============================================================
+-- ЗДОРОВ'Я ВИВОДІВ (2026-10-15, рішення користувача)
+-- ============================================================
+-- Домінантний клас дефектів проєкту — "джоба працює, вивід
+-- вироджений": шість випадків 2026-10-13 і два 2026-10-15, усі
+-- знайдені ВИМІРОМ руками, жоден не впав сам. `freshness.py` відповідає
+-- на питання про ЧАС, `quality.py` — про ПЕРЕЗАПИС, а на питання "а чи
+-- вивід узагалі різнить щось" не відповідав ніхто.
+--
+-- Один рядок = один прогін однієї перевірки. Історія потрібна, щоб
+-- алерт ішов лише при ЗМІНІ стану: перевірка, що щодня звітує "усе
+-- гаразд", стає шумом (той самий урок, що звірка FRED↔BLS і прапорець
+-- нестабільних ревізій).
+CREATE TABLE IF NOT EXISTS output_health_checks (
+    id            BIGSERIAL PRIMARY KEY,
+    check_name    TEXT NOT NULL,
+    target_table  TEXT NOT NULL,
+    status        TEXT NOT NULL,          -- ok | fail | skipped
+    measured      JSONB NOT NULL,         -- що саме зміряно (рядки, distinct, частка NULL)
+    detail        TEXT NOT NULL,
+    checked_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_output_health_name_time
+    ON output_health_checks (check_name, checked_at DESC);
+
+-- ============================================================
+-- КАЛЕНДАР ЗВІТНОСТІ КОМПАНІЙ (2026-10-15, рішення користувача)
+-- ============================================================
+-- Дат звітності не було взагалі: EPS використовувався як ЦИФРА в
+-- Tier B, але "коли вийде наступний звіт" агент не знав. Релізний
+-- календар покриває лише 15 макропоказників, тож у `catalyst_score`
+-- акції мали прицільну подію тільки за наявності новини — зміряно
+-- 2026-10-13: власну подію мали 9 кандидатів із 29, решта стояла на
+-- спільному макрофоні.
+--
+-- Джерело — Nasdaq earnings calendar (неофіційний публічний endpoint,
+-- той самий клас, що ForexFactory для макро: єдине безкоштовне, що
+-- дає МАЙБУТНЮ дату; Twelve Data віддає лише минулі звіти без
+-- платного плану — перевірено живим запитом 2026-10-15, 403).
+CREATE TABLE IF NOT EXISTS earnings_calendar (
+    id            BIGSERIAL PRIMARY KEY,
+    ticker        TEXT NOT NULL,
+    report_date   DATE NOT NULL,
+    report_time   TEXT,                   -- before/after market, як віддає джерело
+    eps_forecast  NUMERIC,
+    company_name  TEXT,
+    source        TEXT NOT NULL,
+    fetched_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (ticker, report_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_earnings_calendar_date
+    ON earnings_calendar (report_date);
+
+-- ============================================================
+-- КОМПРЕСІЯ raw_observations (2026-10-15, рішення користувача)
+-- ============================================================
+-- Правило 6 забороняє ВИДАЛЯТИ сирі дані, але не забороняє їх
+-- СТИСКАТИ: рядки лишаються на місці й читаються прозоро. Підстава —
+-- зміряний приріст: `crypto_derivatives_collect` пише 5210 рядків/добу
+-- (~1.9 млн/рік), а глибше 21 дня ці ряди не читає жоден механізм
+-- (`crypto_screening/_history_db.py`).
+--
+-- ЗМІРЯНО на живому чанку 2026-10-15: 3280 кБ → 464 кБ, тобто **7.1×**.
+--
+-- ПЕРЕВІРЕНО (а не припущено), що компресія не ламає збір:
+--   · INSERT у стиснутий чанк працює (TimescaleDB 2.30);
+--   · ревізія того самого ключа працює (`insert_observation` → 2);
+--   · дедуп однакового значення працює (→ None);
+--   · UNIQUE (source, metric_id, observed_at, revision) ДОСІ діє —
+--     повторна вставка тієї самої ревізії відхиляється.
+-- Практично цей шлях і не задіюється: збір пише СЬОГОДНІШНЮ дату, а
+-- компресія торкається лише чанків, старших за 30 днів.
+--
+-- `segmentby = source` (не `metric_id`): metric_id має високу
+-- кардинальність (~5 тис. ф'ючерсних символів), і сегментація по
+-- ньому дала б по кілька рядків на сегмент — компресія на такому
+-- зростає в розмірі, а не падає. Сортування за metric_id у межах
+-- сегмента дає ту саму локальність без дроблення.
+ALTER TABLE raw_observations SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'source',
+    timescaledb.compress_orderby = 'metric_id, observed_at DESC, revision DESC'
+);
+
+-- 30 днів, а не 7: найглибше вікно читання в агента — `TREND_LONG_DAYS`
+-- (60 днів) по watchlist-цінах і 21 день префетчу ф'ючерсної історії.
+-- Стиснуті чанки читаються, просто повільніше, тож запас у 30 днів
+-- тримає всю "гарячу" аналітику на нестиснутих даних.
+SELECT add_compression_policy('raw_observations', INTERVAL '30 days', if_not_exists => TRUE);

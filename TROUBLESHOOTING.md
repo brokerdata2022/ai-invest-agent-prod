@@ -139,13 +139,13 @@ docker compose exec app python data-ingestion/apply_schema.py
 ### Тести падають
 
 ```bash
-docker compose exec app pytest -q                      # очікується 1374 passed
+docker compose exec app pytest -q                      # очікується 1442 passed
 docker compose exec app pytest -q --tb=short 2>&1 | tail -40
 docker compose exec app pytest analysis/tests/test_trend.py -x -vv
 ```
 
 Тести не торкаються мережі й бази — лише код, і **не потребують
-жодного API-ключа**: усі 1374 проходять на незаповненому `.env`
+жодного API-ключа**: усі 1442 проходять на незаповненому `.env`
 (перевірено наскрізним розгортанням 2026-10-13). Якщо вони падають
 одразу після `git clone`, найчастіша причина — старий образ:
 
@@ -167,7 +167,7 @@ docker compose up -d --build
 > `monkeypatch.setenv` у кожному з чотирьох.
 
 Тести, які проходять, кажуть **лише** що код цілий. Вони не
-перевіряють наявність даних: на порожній базі всі 1374 пройдуть, а
+перевіряють наявність даних: на порожній базі всі 1442 пройдуть, а
 скринінг і синтез нічого не покажуть.
 
 ---
@@ -462,7 +462,7 @@ docker compose exec db psql -U invest_agent -d invest_agent -c \
      from trading_list where created_at > now() - interval '7 days'"
 ```
 
-`distinct_scores = 1` при `rows = 300` — дефект, навіть якщо всі 1374
+`distinct_scores = 1` при `rows = 300` — дефект, навіть якщо всі 1442
 тести зелені.
 
 Повний цикл перевірки правки — [OPERATIONS.md](OPERATIONS.md), розділ

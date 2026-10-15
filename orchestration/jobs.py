@@ -521,6 +521,104 @@ def _prune_raw_news() -> None:
         conn.close()
 
 
+# Колонка часу шукається серед цих, у такому порядку: таблиці проєкту
+# називають її по-різному (`run_at` у знімкових, `discovered_at` у
+# новачків, `checked_at` у перевірок здоров'я). Перелік явний, бо
+# вгадувати "будь-яку timestamptz-колонку" означало б рано чи пізно
+# прибрати дані за `notified_at`.
+_TIME_COLUMN_CANDIDATES = ("run_at", "discovered_at", "checked_at", "created_at")
+
+
+def _time_column(conn, table: str):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s AND column_name = ANY(%s)
+            """,
+            (table, list(_TIME_COLUMN_CANDIDATES)),
+        )
+        present = {row[0] for row in cur.fetchall()}
+    for candidate in _TIME_COLUMN_CANDIDATES:
+        if candidate in present:
+            return candidate
+    return None
+
+
+def _prune_derived() -> None:
+    """Прибирає ПОХІДНІ результати, старші за config.DERIVED_RETENTION_DAYS,
+    і невикористані рядки `llm_call_log`.
+
+    **Чому це не порушує критичне правило 6.** Правило захищає СИРІ
+    ЗІБРАНІ дані (`raw_observations`) — вони лишаються append-only
+    назавжди, їх ми лише СТИСКАЄМО (db/schema.sql, компресія з 30-го
+    дня, зміряно 7.1×). Тут прибираються похідні висновки, які агент
+    перерахує з сирих даних будь-коли.
+
+    **Чому `llm_call_log` окремо.** Критичне правило 5 вимагає, щоб під
+    КОЖНИМ збереженим висновком лишався його промпт. Тому видаляються
+    лише рядки, старші за вікно І не згадані жодною з
+    `config.LLM_CALL_REFERENCING_TABLES` (перевірено проти БД
+    2026-10-15: саме ці 11 таблиць мають стовпець `llm_call_id`).
+
+    **Що свідомо не прибирається:** `backtest_verdicts` (на них
+    `method_selector` обирає ШІ vs naive), `metric_forecasts` і
+    `decision_outcomes` (вимірювана історія ЯКОСТІ агента),
+    `earnings_calendar`, `release_log`, `watchlist_assets`, `sources`.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "data-ingestion"))
+    sys.path.insert(0, str(REPO_ROOT))
+    from common.db import get_connection  # noqa: E402
+
+    import config  # noqa: E402
+
+    conn = get_connection()
+    total = 0
+    try:
+        for table, days in sorted(config.DERIVED_RETENTION_DAYS.items()):
+            column = _time_column(conn, table)
+            if column is None:
+                # Таблиці може ще не бути (нова функція) — це не збій
+                # прибирання, і решту воно забирати не має.
+                logger.warning("%s: не знайшов колонки часу — пропускаю", table)
+                continue
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"DELETE FROM {table} WHERE {column} < now() - (%s || ' days')::interval",  # noqa: S608
+                    (days,),
+                )
+                deleted = cur.rowcount
+            conn.commit()
+            total += deleted
+            logger.info("%s: видалено %d рядків (старші за %d днів)", table, deleted, days)
+
+        # llm_call_log — лише те, на що ніхто не посилається (rule 5).
+        refs = " UNION ALL ".join(
+            f"SELECT llm_call_id FROM {t} WHERE llm_call_id IS NOT NULL"
+            for t in config.LLM_CALL_REFERENCING_TABLES
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                DELETE FROM llm_call_log
+                WHERE created_at < now() - (%s || ' days')::interval
+                  AND id NOT IN ({refs})
+                """,  # noqa: S608
+                (config.LLM_CALL_LOG_RETENTION_DAYS,),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+        total += deleted
+        logger.info(
+            "llm_call_log: видалено %d рядків (старші за %d днів і без посилань)",
+            deleted, config.LLM_CALL_LOG_RETENTION_DAYS,
+        )
+
+        logger.info("Прибирання похідних: %d рядків усього", total)
+    finally:
+        conn.close()
+
+
 JOBS = {
     # ОДИН конвеєр замість СЕМИ щохвилинних джоб (злито 2026-10-13):
     # check_releases → update_forecasts → compare_expectations →
@@ -756,6 +854,24 @@ JOBS = {
     },
     "prune_raw_news": {
         "callable": _prune_raw_news,
+    },
+    "prune_derived": {
+        "callable": _prune_derived,
+    },
+    "evaluate_outcomes": {
+        "subprocess": _py(str(REPO_ROOT / "monitoring" / "evaluate_outcomes.py")),
+    },
+    "notify_outcomes": {
+        "subprocess": _py(str(REPO_ROOT / "reporting" / "outcomes_notify.py")),
+    },
+    "output_health": {
+        "subprocess": _py(str(REPO_ROOT / "monitoring" / "output_health.py"), "--notify"),
+    },
+    "earnings_calendar": {
+        "subprocess": _py(str(REPO_ROOT / "data-ingestion" / "run_collect_earnings.py")),
+    },
+    "quotes_crosscheck": {
+        "subprocess": _py(str(REPO_ROOT / "monitoring" / "crosscheck_quotes.py"), "--notify"),
     },
     "scheduler_heartbeat": {
         "callable": _scheduler_heartbeat,
