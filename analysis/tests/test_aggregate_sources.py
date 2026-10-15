@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from crypto_screening.aggregate_sources import (
     aggregate_snapshots,
+    okx_symbol,
     canonicalize_symbol,
     enrich_with_binance_oi,
 )
@@ -69,3 +70,16 @@ def test_enrich_with_binance_oi_adds_to_existing_symbol_only():
     assert aggregated["BTCUSDT"]["open_interest_usd"] == Decimal("7000000000")
     assert aggregated["ETHUSDT"]["open_interest_usd"] == Decimal("2000000000")  # не чіпалось
     assert "UNKNOWNUSDT" not in aggregated  # символа немає в aggregated -> ігнорується
+
+
+def test_okx_symbol_is_inverse_of_canonicalize():
+    """Потрібна читачеві історії: у raw_observations OKX лежить під
+    рідним instId, а скринінг оперує канонічним ключем
+    (docs/decisions.md 2026-10-15)."""
+    assert okx_symbol("BTCUSDT") == "BTC-USDT-SWAP"
+    assert canonicalize_symbol("okx_futures", okx_symbol("BTCUSDT")) == "BTCUSDT"
+
+
+def test_okx_symbol_none_for_non_usdt_symbol():
+    assert okx_symbol("BTCUSDC") is None
+    assert okx_symbol("USDT") is None

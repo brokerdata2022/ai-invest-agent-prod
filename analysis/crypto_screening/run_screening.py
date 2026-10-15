@@ -9,15 +9,22 @@
 не для всього ринку) → LONG/SHORT/WATCH (long_screen.py/
 short_watch_screen.py).
 
-**Чесне обмеження (навмисне v1-спрощення, докладніше docs/decisions.md):**
-- `oi_change_pct`/`volume_spike_pct` рахуються з ІСТОРІЇ, яку зберігає
-  ЛИШЕ Bybit (`bybit_futures` — єдина з 3 бірж, де і обсяг, і OI в
-  одному bulk-запиті, тому історія самоузгоджена, без кросбіржевого
-  вирівнювання). Символи поза Bybit або з ще не накопиченою історією
-  (`crypto_derivatives_collect`@6:10 лише почала збір 2026-09-27)
-  отримають None по цих полях — `screen_long`/`screen_short_or_watch`
-  коректно трактують це як "критерій не пройдено", не падають. Сигнали
-  з'являться природно за кілька днів збору.
+**Історія — кросбіржова з 2026-10-15** (docs/decisions.md): раніше
+`oi_change_pct`/`volume_spike_pct` читались ЛИШЕ з Bybit, бо на старті
+збору (27.09) історії не було ні в кого, і один самоузгоджений ряд був
+дешевшим за вирівнювання трьох. Зміряно через 18 днів збору: з 1056
+символів ринку історію мали 855 — тобто 201 символ отримував None
+НАЗАВЖДИ, а `screen_long`/`screen_short_or_watch` трактують None як
+"критерій не пройдено", тож такий символ не міг стати ні LONG, ні
+SHORT (максимум WATCH). Дані Binance/OKX при цьому збирались щодня й
+не читались жодним механізмом.
+  Тепер `_history_db.py` читає всі три біржі (кожна зі своїм
+  написанням символу й назвою метрики), а `history.py` зводить їх у
+  денний ряд СУМОЮ — так само, як `aggregate_sources.py` робить із
+  живим знімком. Беруться лише біржі, присутні на ОБОХ краях вікна:
+  інакше новий лістинг посеред вікна дав би стрибок суми, який
+  виглядав би як приріст OI. Символ з однією біржею поводиться точно
+  як раніше.
 - RSI/тренд — з ЦІНИ БІРЖІ (Binance klines) напряму — НЕ залежать від
   власного збору, доступні одразу, але потребують, щоб символ узагалі
   торгувався на Binance (не завжди так — символи з Bybit/OKX без
@@ -58,13 +65,14 @@ sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_ANALYSIS_DIR, "..", "data-ingestion"))
 sys.path.insert(0, _ANALYSIS_DIR)
 
-from common.db import get_connection, fetch_recent  # noqa: E402
+from common.db import get_connection, insert_observations  # noqa: E402
 
 from crypto.binance_futures_adapter import (  # noqa: E402
     list_perpetual_symbols as list_binance_symbols,
     fetch_market_snapshot as fetch_binance_snapshot,
     fetch_open_interest as fetch_binance_oi,
     fetch_klines,
+    open_interest_records,
 )
 from crypto.bybit_futures_adapter import (  # noqa: E402
     list_perpetual_symbols as list_bybit_symbols,
@@ -79,6 +87,16 @@ from crypto_screening.aggregate_sources import (  # noqa: E402
     aggregate_snapshots,
     canonicalize_symbol,
     enrich_with_binance_oi,
+)
+from crypto_screening._history_db import (  # noqa: E402
+    KIND_OI,
+    KIND_VOLUME,
+    fetch_history_rows,
+)
+from crypto_screening.history import (  # noqa: E402
+    consistent_daily_series,
+    oi_change_pct,
+    volume_spike_pct,
 )
 from crypto_screening.tier_a import check_tier_a  # noqa: E402
 from crypto_screening.indicators import rsi  # noqa: E402
@@ -102,8 +120,11 @@ from forecasting.backtest import backtest_metric  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# v1-спрощення: історія OI/обсягу — лише з Bybit (див. docstring модуля).
-HISTORY_SOURCE = "bybit_futures"
+# Скільки днів історії діставати з БД під вікно розрахунку. Вікна —
+# OI_WINDOW_DAYS_LONG/SHORT і VOLUME_LOOKBACK_DAYS (config.py); беремо
+# із запасом, бо день без збору (збій біржі/мережі) не має обривати
+# вікно — consistent_daily_series() сама візьме потрібні N днів.
+HISTORY_PREFETCH_DAYS = 21
 # Пороги (OI_WINDOW_DAYS_*/VOLUME_LOOKBACK_DAYS/KLINES_LIMIT/RSI_PERIOD/
 # PUMP_THRESHOLD_PCT) — config.py, єдиний файл для
 # ручного редагування (2026-10-03).
@@ -131,20 +152,20 @@ def pump_pct_from_aggregated(data: dict) -> Optional[float]:
 
 
 def compute_oi_change_pct(conn, symbol: str, window_days: int) -> Optional[float]:
-    rows = fetch_recent(conn, HISTORY_SOURCE, f"{symbol.lower()}_open_interest_value", limit=window_days + 1)
-    if len(rows) < window_days + 1:
-        return None
-    return _pct_change(float(rows[-1]["value"]), float(rows[0]["value"]))
+    """Зміна OI за вікно — по ВСІХ біржах, де є узгоджена історія
+    (history.py). До 2026-10-15 читалось лише з Bybit, і 201 символ із
+    1056 отримував None назавжди — docs/decisions.md."""
+    rows = fetch_history_rows(conn, symbol, KIND_OI, days=HISTORY_PREFETCH_DAYS)
+    series = consistent_daily_series(rows, limit=window_days + 1)
+    return oi_change_pct(series)
 
 
 def compute_volume_spike_pct(conn, symbol: str) -> Optional[float]:
-    rows = fetch_recent(conn, HISTORY_SOURCE, f"{symbol.lower()}_quote_volume", limit=VOLUME_LOOKBACK_DAYS + 1)
-    if len(rows) < VOLUME_LOOKBACK_DAYS + 1:
-        return None
-    latest = float(rows[0]["value"])
-    baseline = [float(r["value"]) for r in rows[1:]]
-    avg_baseline = sum(baseline) / len(baseline)
-    return _pct_change(avg_baseline, latest)
+    """Сплеск обсягу проти середнього за вікно — по всіх біржах
+    (та сама причина, що в compute_oi_change_pct)."""
+    rows = fetch_history_rows(conn, symbol, KIND_VOLUME, days=HISTORY_PREFETCH_DAYS)
+    series = consistent_daily_series(rows, limit=VOLUME_LOOKBACK_DAYS + 1)
+    return volume_spike_pct(series)
 
 
 def compute_price_indicators(session: requests.Session, symbol: str) -> dict:
@@ -313,6 +334,26 @@ def run_screening(limit: Optional[int] = None) -> dict[str, list]:
             except Exception:
                 logger.warning("%s: Binance OI не вдалось отримати", symbol, exc_info=True)
         enrich_with_binance_oi(aggregated, binance_oi_usd)
+
+        # Зберегти щойно дістаний Binance OI (docs/decisions.md
+        # 2026-10-15). Досі він використовувався для СЬОГОДНІШНЬОГО
+        # рівня й викидався — тобто запити робились щодня, а історії по
+        # них не було ніколи, і 133 символи, що торгуються лише на
+        # Binance, не могли отримати oi_change_pct у принципі.
+        # Нормалізація — в адаптері (rule 1), тут лише запис.
+        try:
+            oi_records = open_interest_records({**binance_oi_cache, **binance_oi_usd})
+            if oi_records:
+                stored = insert_observations(conn, oi_records)
+                logger.info(
+                    "Binance OI збережено: %d записів (%d нових/змінених)",
+                    len(oi_records), stored,
+                )
+        except Exception:
+            # Збій запису не має валити скринінг: вердикт по сьогоднішньому
+            # дню рахується з живого знімка, історія лише накопичується.
+            logger.error("Binance OI не вдалось зберегти", exc_info=True)
+            conn.rollback()
 
         for symbol in eligible:
             try:

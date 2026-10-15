@@ -60,6 +60,7 @@ Telegram") — НЕ з реєстру JOBS, своя гілка диспетче
     python telegram_commands.py
 """
 
+import argparse
 import logging
 import os
 import subprocess
@@ -492,7 +493,28 @@ def process_update(
         send_telegram_message(token, configured_chat_id, format_unknown_command(command), parse_mode="HTML")
 
 
+DESCRIPTION = (
+    "Опитує Telegram і виконує команди-джоби. Аргументів не має."
+)
+
+
+def _parse_args(argv=None) -> argparse.Namespace:
+    """Аргументів немає — парсер потрібен РАДИ `--help`.
+
+    Живий збій 2026-10-15 (docs/decisions.md): гейт
+    `orchestration/tests/test_jobs_importable.py` перевіряє всі джоби
+    запуском `<скрипт> --help`, бо "argparse виходить до main(), але
+    імпорти вже виконані". Без argparse `--help` не виходить — і
+    `pytest` ВИКОНУЄ джобу по-справжньому: БД, мережа, LLM, розсилки.
+    Живо: прогін тестів створив огляд календаря на 15.10 і НАДІСЛАВ
+    його в Telegram.
+    """
+    parser = argparse.ArgumentParser(description=DESCRIPTION)
+    return parser.parse_args(argv)
+
+
 def main() -> None:
+    _parse_args()
     load_dotenv()
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")

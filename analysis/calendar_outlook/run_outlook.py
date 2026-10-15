@@ -17,6 +17,7 @@ orchestration/runner.py) пропускає саме його LLM-виклик, 
     python run_outlook.py
 """
 
+import argparse
 import logging
 import os
 import sys
@@ -111,7 +112,28 @@ def run_outlook(conn, today: date) -> list[int]:
     return outlook_ids
 
 
+DESCRIPTION = (
+    "Ранковий огляд календаря релізів: що виходить найближчими днями й на що це впливає. Аргументів не має."
+)
+
+
+def _parse_args(argv=None) -> argparse.Namespace:
+    """Аргументів немає — парсер потрібен РАДИ `--help`.
+
+    Живий збій 2026-10-15 (docs/decisions.md): гейт
+    `orchestration/tests/test_jobs_importable.py` перевіряє всі джоби
+    запуском `<скрипт> --help`, бо "argparse виходить до main(), але
+    імпорти вже виконані". Без argparse `--help` не виходить — і
+    `pytest` ВИКОНУЄ джобу по-справжньому: БД, мережа, LLM, розсилки.
+    Живо: прогін тестів створив огляд календаря на 15.10 і НАДІСЛАВ
+    його в Telegram.
+    """
+    parser = argparse.ArgumentParser(description=DESCRIPTION)
+    return parser.parse_args(argv)
+
+
 def main() -> None:
+    _parse_args()
     load_dotenv()
     require_api_key("calendar_outlook")
 

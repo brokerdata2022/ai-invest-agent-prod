@@ -172,7 +172,7 @@ bash scripts/restore_db.sh
 docker compose exec app pytest -q
 ```
 
-Очікується **1354 passed**. Ключі для цього не потрібні — тести
+Очікується **1374 passed**. Ключі для цього не потрібні — тести
 перевіряють код і не торкаються ні мережі, ні бази, тож проходять і
 на незаповненому `.env`. Якщо падають —
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
@@ -343,21 +343,106 @@ ssh -L 5432:127.0.0.1:5432 user@сервер
 
 ## Оновлення до нової версії
 
+Повна процедура — по одній команді за раз, щоб на кожному кроці було
+видно результат. Виконувати з теки, куди клоновано цей репозиторій.
+
+### 1. Резерв перед оновленням
+
 ```bash
-cd ai-invest-agent
-docker compose exec app pytest -q                   # зафіксувати: до оновлення було добре
 bash scripts/backup_db.sh ~/backup-before-update.sql.gz
+```
+
+Єдиний крок, який не можна пропустити: дані (`raw_observations`) —
+незамінні, код завжди можна відкотити через `git`.
+
+### 2. Забрати нову версію
+
+```bash
 git pull
-docker compose up -d --build                        # ребілд потрібен лише якщо змінився requirements.txt
-docker compose exec app python data-ingestion/apply_schema.py   # схема ідемпотентна
+```
+
+### 3. Перезапустити з новим кодом
+
+```bash
+docker compose up -d --build
+```
+
+Код монтується в контейнер як volume, тож формально ребілд обовʼязковий
+**лише** коли змінився `requirements.txt` або `Dockerfile`. Але
+`up -d --build` безпечний завжди й гарантує, що **планувальник
+перезапустився з новим кодом** — без цього `scheduler` і далі крутить
+старий (він запускає джоби як підпроцеси, але сам процес `main.py`
+живе в памʼяті з моменту старту).
+
+### 4. Застосувати схему
+
+```bash
+docker compose exec app python data-ingestion/apply_schema.py
+```
+
+Безпечно повторювати: усі `CREATE` — з `IF NOT EXISTS`, усі `INSERT` —
+з `ON CONFLICT DO NOTHING`.
+
+### 5. Перевірити код
+
+```bash
 docker compose exec app pytest -q
 ```
 
-`apply_schema.py` безпечно запускати повторно: усі `CREATE` — з
-`IF NOT EXISTS`, усі `INSERT` — з `ON CONFLICT DO NOTHING`.
+Очікувано: `1374 passed` за ~10-15 секунд.
 
-Код монтується в контейнер як volume, тож після `git pull` ребілд
-потрібен **лише** коли змінився `requirements.txt` або `Dockerfile`.
+> **Якщо оновлюєтесь із версії до 2026-10-15** — зверніть увагу:
+> раніше цей самий `pytest` **виконував пʼять джоб по-справжньому**.
+> Гейт перевірки імпортів запускає кожен скрипт-джобу з `--help`,
+> розраховуючи, що argparse вийде до `main()`; у пʼяти скриптів
+> argparse не було, тож вони виконувались цілком — із викликами LLM,
+> записами в БД і **надсиланням повідомлень у Telegram**. Саме так це
+> й знайшлося: прогін тестів на відновленій базі надіслав огляд
+> календаря. Виправлено; ознака, що нова версія справді стала —
+> `pytest` триває секунди, а не хвилину-дві.
+
+### 6. Переконатися, що планувальник узявся до роботи
+
+```bash
+docker compose logs --tail 20 scheduler
+```
+
+У лозі має бути свіжий рядок про зареєстровані джоби, а далі —
+`scheduler_heartbeat` кожні 5 хвилин. Пряма перевірка пульсу:
+
+```bash
+docker compose exec db psql -U invest_agent -d invest_agent -c \
+  "select last_tick_at, now() - last_tick_at as age from scheduler_heartbeat"
+```
+
+`age` більше 10 хвилин означає, що планувальник не працює — далі
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+### 7. Прогнати одну джобу вручну
+
+```bash
+docker compose exec app python orchestration/run_job.py crypto_screening_daily
+```
+
+Остання перевірка — тим самим кодом і образом, що й за розкладом.
+Будь-яку іншу джобу видно в `orchestration/run_job.py --list`.
+
+### Якщо щось пішло не так
+
+```bash
+git log --oneline -5
+```
+
+Відкотитись на попередній коміт і перезапустити:
+
+```bash
+git checkout <попередній-хеш> && docker compose up -d --build
+```
+
+Дані при цьому не торкаються — вони в томі БД, не в коді. Якщо
+постраждали саме дані, відновлюйте з резерву кроку 1:
+`bash scripts/restore_db.sh ~/backup-before-update.sql.gz` (потрібна
+ЧИСТА база — скрипт сам про це скаже).
 
 ---
 

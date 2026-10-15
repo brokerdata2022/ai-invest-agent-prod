@@ -17,6 +17,7 @@ from crypto.binance_futures_adapter import (
     fetch_market_snapshot,
     fetch_open_interest,
     list_perpetual_symbols,
+    open_interest_records,
 )
 
 EXCHANGE_INFO_RESPONSE = {
@@ -208,3 +209,24 @@ def test_fetch_klines_returns_empty_when_symbol_not_listed_on_binance():
     # (aggregate_sources.py), не завжди є на Binance Futures під тією
     # самою назвою — Binance повертає HTTP 400, не порожній список.
     assert fetch_klines(Failing400Session(), "CASHCATUSDT") == []
+
+
+def test_open_interest_records_normalizes_per_symbol_oi():
+    """Дефект 2026-10-15: per-symbol OI діставався щодня й викидався.
+    Назва метрики — та сама, що в OKX (`open_interest_usd`), бо
+    величина та сама: OI у доларах."""
+    records = open_interest_records({"BTCUSDT": Decimal("5000000")})
+
+    assert len(records) == 1
+    assert records[0].source == "binance_futures"
+    assert records[0].metric_id == "btcusdt_open_interest_usd"
+    assert records[0].value == Decimal("5000000")
+    assert records[0].observed_at == records[0].fetched_at.date()
+
+
+def test_open_interest_records_skips_none_values():
+    """fetch_open_interest() вертає None на неповній відповіді — такий
+    символ не має створювати запису зі значенням-дірою."""
+    records = open_interest_records({"BTCUSDT": None, "ETHUSDT": Decimal("1")})
+
+    assert [r.metric_id for r in records] == ["ethusdt_open_interest_usd"]

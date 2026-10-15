@@ -35,6 +35,7 @@ from decimal import Decimal
 from typing import Optional
 
 OKX_SUFFIX = "-USDT-SWAP"
+QUOTE_CURRENCY = "USDT"
 
 
 def canonicalize_symbol(exchange: str, raw_symbol: str) -> str:
@@ -43,6 +44,28 @@ def canonicalize_symbol(exchange: str, raw_symbol: str) -> str:
     if exchange == "okx_futures" and raw_symbol.endswith(OKX_SUFFIX):
         return raw_symbol[: -len(OKX_SUFFIX)] + "USDT"
     return raw_symbol
+
+
+def okx_symbol(canonical_symbol: str) -> Optional[str]:
+    """Обернена до `canonicalize_symbol()`: "BTCUSDT" -> "BTC-USDT-SWAP".
+
+    Потрібна читачеві ІСТОРІЇ (`_history_db.py`): у `raw_observations`
+    OKX лежить під рідним instId, а скринінг оперує канонічним ключем.
+    Без неї історію OKX неможливо знайти по канонічному символу — і
+    саме тому вона 18 днів писалась, але не читалась (docs/decisions.md
+    2026-10-15).
+
+    `None`, якщо канонічний символ не USDT-номінований: OKX збирає
+    ЛИШЕ USDT-маржинальні SWAP (`okx_futures_adapter.py:QUOTE_SUFFIX`),
+    тож для "BTCUSDC" відповідного ряду там не існує — і питати про
+    нього базу не треба.
+    """
+    if not canonical_symbol.endswith(QUOTE_CURRENCY):
+        return None
+    base = canonical_symbol[: -len(QUOTE_CURRENCY)]
+    if not base:
+        return None
+    return f"{base}{OKX_SUFFIX}"
 
 
 def aggregate_snapshots(

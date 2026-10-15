@@ -30,29 +30,73 @@ def test_pct_change_zero_old_returns_none():
     assert _pct_change(0.0, 10.0) is None
 
 
+def _days(n: int) -> list:
+    """n денних дат, найновіша перша."""
+    return [date(2026, 10, 15) - timedelta(days=i) for i in range(n)]
+
+
 def test_compute_oi_change_pct_returns_none_when_not_enough_history(monkeypatch):
     monkeypatch.setattr(
-        "crypto_screening.run_screening.fetch_recent",
-        lambda conn, source, metric_id, limit: [{"value": 100.0}],
+        "crypto_screening.run_screening.fetch_history_rows",
+        lambda conn, symbol, kind, days: [(date(2026, 10, 15), "bybit_futures", 100.0)],
     )
     assert compute_oi_change_pct(conn=None, symbol="BTCUSDT", window_days=7) is None
 
 
 def test_compute_oi_change_pct_computes_from_newest_and_oldest(monkeypatch):
-    rows = [{"value": 120.0}, {"value": 110.0}, {"value": 100.0}]  # найновіше перше
+    d = _days(3)
+    rows = [
+        (d[0], "bybit_futures", 120.0),
+        (d[1], "bybit_futures", 110.0),
+        (d[2], "bybit_futures", 100.0),
+    ]
     monkeypatch.setattr(
-        "crypto_screening.run_screening.fetch_recent",
-        lambda conn, source, metric_id, limit: rows,
+        "crypto_screening.run_screening.fetch_history_rows",
+        lambda conn, symbol, kind, days: rows,
     )
     result = compute_oi_change_pct(conn=None, symbol="BTCUSDT", window_days=2)
     assert result == pytest.approx(20.0)  # (120-100)/100*100
 
 
-def test_compute_volume_spike_pct_compares_latest_to_average_baseline(monkeypatch):
-    rows = [{"value": 200.0}] + [{"value": 100.0}] * 7
+def test_compute_oi_change_pct_sums_across_exchanges(monkeypatch):
+    """Регресія на дефект 2026-10-15: історія читалась із ОДНОЇ біржі,
+    тоді як живий рівень OI — кросбіржова сума."""
+    d = _days(3)
+    rows = [
+        (d[0], "bybit_futures", 60.0), (d[0], "okx_futures", 60.0),
+        (d[1], "bybit_futures", 55.0), (d[1], "okx_futures", 55.0),
+        (d[2], "bybit_futures", 50.0), (d[2], "okx_futures", 50.0),
+    ]
     monkeypatch.setattr(
-        "crypto_screening.run_screening.fetch_recent",
-        lambda conn, source, metric_id, limit: rows,
+        "crypto_screening.run_screening.fetch_history_rows",
+        lambda conn, symbol, kind, days: rows,
+    )
+    result = compute_oi_change_pct(conn=None, symbol="BTCUSDT", window_days=2)
+    assert result == pytest.approx(20.0)  # 120 проти 100 — як сума, не як одна біржа
+
+
+def test_compute_oi_change_pct_available_for_symbol_absent_on_bybit(monkeypatch):
+    """Головний сенс правки: символ лише на OKX більше не отримує None
+    (а значить, може стати LONG/SHORT, а не тільки WATCH)."""
+    d = _days(3)
+    rows = [
+        (d[0], "okx_futures", 120.0),
+        (d[1], "okx_futures", 110.0),
+        (d[2], "okx_futures", 100.0),
+    ]
+    monkeypatch.setattr(
+        "crypto_screening.run_screening.fetch_history_rows",
+        lambda conn, symbol, kind, days: rows,
+    )
+    assert compute_oi_change_pct(conn=None, symbol="SOMEUSDT", window_days=2) == pytest.approx(20.0)
+
+
+def test_compute_volume_spike_pct_compares_latest_to_average_baseline(monkeypatch):
+    d = _days(8)
+    rows = [(d[0], "bybit_futures", 200.0)] + [(day, "bybit_futures", 100.0) for day in d[1:]]
+    monkeypatch.setattr(
+        "crypto_screening.run_screening.fetch_history_rows",
+        lambda conn, symbol, kind, days: rows,
     )
     result = compute_volume_spike_pct(conn=None, symbol="BTCUSDT")
     assert result == pytest.approx(100.0)  # 200 проти базового середнього 100 -> +100%
@@ -161,6 +205,12 @@ def _patch_sources(monkeypatch):
     # реалізує cursor() (той самий принцип, що upsert_candidate, який
     # теж не торкається реальної БД у цих тестах, лише перевіряють
     # саму логіку сигналів, не персистування).
+    # Персист Binance OI (2026-10-15) — FakeConn не реалізує cursor(),
+    # той самий принцип, що save_long_run/upsert_candidate нижче.
+    monkeypatch.setattr(
+        "crypto_screening.run_screening.insert_observations",
+        lambda conn, records: len(records),
+    )
     monkeypatch.setattr("crypto_screening.run_screening.save_long_run", lambda conn, signals: len(signals))
     monkeypatch.setattr("crypto_screening.run_screening.upsert_candidate", lambda *args, **kwargs: None)
 
@@ -184,6 +234,31 @@ def test_run_screening_wires_tier_a_survivor_into_long_signal(monkeypatch):
     assert results["short"] == []
     # price_change_percent=1.0 в усіх фікстурах-знімках -> pump_pct=1.0 < PUMP_THRESHOLD_PCT -> "none"
     assert results["watch"] == []
+
+
+def test_run_screening_persists_binance_open_interest(monkeypatch):
+    """Регресія на дефект 2026-10-15: per-symbol Binance OI діставався
+    щодня для Tier A-виживших і ВИКИДАВСЯ — історії по символах, що
+    торгуються лише на Binance, не накопичувалось ніколи."""
+    _patch_sources(monkeypatch)
+    captured: list = []
+    monkeypatch.setattr(
+        "crypto_screening.run_screening.insert_observations",
+        lambda conn, records: captured.extend(records) or len(records),
+    )
+    monkeypatch.setattr(
+        "crypto_screening.run_screening.compute_price_indicators",
+        lambda session, symbol: {"rsi": 60.0, "trend_confirmed": True},
+    )
+    monkeypatch.setattr("crypto_screening.run_screening.compute_oi_change_pct", lambda conn, symbol, window_days: 8.0)
+    monkeypatch.setattr("crypto_screening.run_screening.compute_volume_spike_pct", lambda conn, symbol: 0.0)
+
+    run_screening()
+
+    assert [r.metric_id for r in captured] == ["btcusdt_open_interest_usd"]
+    assert captured[0].source == "binance_futures"
+    # fetch_binance_oi -> 50000 (базові одиниці) × mark_price 100 = $5 млн
+    assert captured[0].value == Decimal("5000000")
 
 
 def test_run_screening_produces_watch_not_short_on_critical_funding_after_pump(monkeypatch):

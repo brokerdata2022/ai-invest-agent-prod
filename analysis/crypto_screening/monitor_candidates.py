@@ -39,6 +39,7 @@
     python monitor_candidates.py
 """
 
+import argparse
 import logging
 import os
 import sys
@@ -168,7 +169,28 @@ def monitor_once(conn, session: requests.Session) -> dict[str, int]:
     return counts
 
 
+DESCRIPTION = (
+    "Погодинний моніторинг активних крипто-кандидатів (3 біржі). Аргументів не має."
+)
+
+
+def _parse_args(argv=None) -> argparse.Namespace:
+    """Аргументів немає — парсер потрібен РАДИ `--help`.
+
+    Живий збій 2026-10-15 (docs/decisions.md): гейт
+    `orchestration/tests/test_jobs_importable.py` перевіряє всі джоби
+    запуском `<скрипт> --help`, бо "argparse виходить до main(), але
+    імпорти вже виконані". Без argparse `--help` не виходить — і
+    `pytest` ВИКОНУЄ джобу по-справжньому: БД, мережа, LLM, розсилки.
+    Живо: прогін тестів створив огляд календаря на 15.10 і НАДІСЛАВ
+    його в Telegram.
+    """
+    parser = argparse.ArgumentParser(description=DESCRIPTION)
+    return parser.parse_args(argv)
+
+
 def main() -> None:
+    _parse_args()
     load_dotenv()
 
     conn = get_connection()

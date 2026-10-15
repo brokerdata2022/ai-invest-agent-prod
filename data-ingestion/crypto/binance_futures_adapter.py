@@ -132,6 +132,47 @@ def fetch_open_interest(session: requests.Session, symbol: str) -> Optional[Deci
         return None
 
 
+def open_interest_records(
+    oi_usd_by_symbol: dict[str, Decimal],
+    fetched_at: Optional[datetime] = None,
+) -> list[NormalizedRecord]:
+    """Перетворює вже дістаний per-symbol OI (у $) у записи для
+    `raw_observations` під metric_id `{symbol}_open_interest_usd` —
+    тією самою назвою, що й OKX, бо величина та сама (OI в доларах).
+
+    **Чому нормалізація тут, а не в скринінгу** (rule 1, CLAUDE.md):
+    формат сирого запису — справа шару збору. `analysis/` лише передає
+    сюди значення, які вже дістав через `fetch_open_interest()`, і
+    записує результат — власного парсингу не має.
+
+    **Чому це взагалі зберігається** (docs/decisions.md 2026-10-15):
+    bulk-знімок Binance OI не містить (ендпоінта немає), а per-symbol
+    OI скринінг дістає ЩОДНЯ для Tier A-виживших — і до 2026-10-15
+    викидав після одного прогону. Тобто запити вже оплачені, а історії
+    по них не накопичувалось ніколи. Покриття цього ряду НЕРІВНОМІРНЕ
+    (лише символи, що проходили фільтр) — читач
+    (`crypto_screening/history.py`) з цим рахується: бере лише біржі,
+    присутні на обох краях вікна.
+    """
+    stamp = fetched_at or datetime.now(timezone.utc)
+    records: list[NormalizedRecord] = []
+    for symbol, oi_usd in oi_usd_by_symbol.items():
+        if oi_usd is None:
+            continue
+        records.append(
+            NormalizedRecord(
+                source=BinanceFuturesAdapter.source,
+                metric_id=f"{symbol.lower()}_open_interest_usd",
+                value=oi_usd,
+                observed_at=stamp.date(),
+                fetched_at=stamp,
+                revision=None,
+                raw_payload={"open_interest_usd": str(oi_usd), "per_symbol": True},
+            )
+        )
+    return records
+
+
 def fetch_klines(session: requests.Session, symbol: str, limit: int = 30, interval: str = "1d") -> list[dict]:
     """Свічки (той самий ендпоінт-стиль, що спотовий
     `binance_adapter.py:fetch()`, тут — futures) — ЦІНА-ІСТОРІЯ для

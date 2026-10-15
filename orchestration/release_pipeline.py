@@ -37,6 +37,7 @@ expectations` (виклик LLM — найненадійніший крок ла
 `notified_at`/статусом).
 """
 
+import argparse
 import logging
 import os
 import subprocess
@@ -157,7 +158,32 @@ def run_step(name: str, script: Path) -> bool:
     return True
 
 
+def _parse_args(argv=None) -> argparse.Namespace:
+    """Аргументів у конвеєра немає — парсер потрібен РАДИ `--help`.
+
+    Живий збій 2026-10-15: `orchestration/tests/test_jobs_importable.py`
+    перевіряє всі джоби запуском `<скрипт> --help` саме тому, що
+    "argparse виходить до main(), але імпорти вже виконані". Тут
+    argparse не було — і `--help` не виходив, а ЗАПУСКАВ увесь
+    релізний ланцюжок: БД, мережа, LLM, розсилки. На порожній дев-базі
+    дешевий гейт закривався одразу, тож тест проходив і дефекту не
+    було видно; на базі з реальними pending-релізами той самий
+    `pytest` (документований гейт розгортання, README) зробив 7
+    LLM-викликів і змінив `release_log`. Тобто перевірка розгортання
+    сама ставала релізним прогоном.
+    """
+    parser = argparse.ArgumentParser(
+        description=(
+            "Релізний конвеєр одним процесом: дешевий SQL-гейт, далі "
+            "детекція → прогноз → порівняння з очікуванням → синтез → звіти. "
+            "Запускається щохвилини планувальником; аргументів не має."
+        )
+    )
+    return parser.parse_args(argv)
+
+
 def main() -> None:
+    _parse_args()
     conn = get_connection()
     try:
         work, breakdown = has_work(conn)
