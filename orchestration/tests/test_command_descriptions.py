@@ -7,15 +7,24 @@
 
 from command_descriptions import INFO_JOB_NAMES, JOB_DESCRIPTIONS, SPECIAL_COMMAND_DESCRIPTIONS
 from jobs import JOBS
-from telegram_commands import WATCHLIST_COMMANDS
+from telegram_commands import ASK_COMMANDS, WATCHLIST_COMMANDS
 
 
 def test_every_job_has_a_description():
     assert set(JOB_DESCRIPTIONS) == set(JOBS), "Кожна джоба має опис і навпаки"
 
 
-def test_every_watchlist_command_has_a_description():
-    assert set(SPECIAL_COMMAND_DESCRIPTIONS) == set(WATCHLIST_COMMANDS)
+def test_every_special_command_has_a_description():
+    """Спеціальні команди — не джоби, тож їхній паритет окремий. `/ask`
+    додано 2026-10-15 (пряме спілкування); у `SPECIAL_COMMAND_DESCRIPTIONS`
+    лише ОДИН його псевдонім — "/"-меню Telegram не має показувати два
+    рядки на ту саму дію, тому `question` лишається синонімом без
+    опису."""
+    described = set(SPECIAL_COMMAND_DESCRIPTIONS)
+
+    assert set(WATCHLIST_COMMANDS) <= described
+    assert described <= set(WATCHLIST_COMMANDS) | ASK_COMMANDS
+    assert described & ASK_COMMANDS, "хоч один псевдонім /ask має бути в меню"
 
 
 def test_watchlist_commands_do_not_collide_with_job_names():

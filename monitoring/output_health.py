@@ -260,11 +260,9 @@ def main() -> None:
             logger.warning("Змінили стан на FAIL: %s", ", ".join(failing))
 
         if args.notify and changes:
-            from _common import resolve_telegram_credentials  # noqa: E402
-            from telegram_client import send_telegram_message  # noqa: E402
+            from _common import send_report  # noqa: E402
 
-            token, chat_id = resolve_telegram_credentials()
-            send_telegram_message(format_alert(changes), token=token, chat_id=chat_id)
+            send_report(format_alert(changes))
             logger.info("Надіслано алерт про %d змін стану", len(changes))
         elif args.notify:
             logger.info(

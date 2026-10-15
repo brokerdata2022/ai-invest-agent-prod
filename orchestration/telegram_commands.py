@@ -74,6 +74,7 @@ import requests
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(REPO_ROOT / "reporting"))
+sys.path.insert(0, str(REPO_ROOT / "analysis"))
 
 # _common додає data-ingestion у sys.path (дефіс у назві теки — не
 # валідне ім'я Python-пакета), тому імпортується ПЕРШИМ (той самий
@@ -96,12 +97,15 @@ from news.gdelt_adapter import validate_gdelt_term  # noqa: E402
 from quotes.twelvedata_adapter import TwelveDataAdapter  # noqa: E402
 from quotes.twelvedata_adapter import search_symbol as search_twelvedata_symbol  # noqa: E402
 from telegram_client import get_updates, send_telegram_message  # noqa: E402
+# Чиста функція без БД і мережі — відсікає короткі репліки від питань.
+from assistant.resolve import looks_like_question  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 HELP_COMMANDS = frozenset({"help", "start"})
 WATCHLIST_COMMANDS = frozenset({"watchlist_list", "watchlist_add", "watchlist_remove"})
+ASK_COMMANDS = frozenset({"ask", "question"})
 
 
 def parse_command(text: str) -> str | None:
@@ -433,6 +437,28 @@ def launch_job(job_name: str) -> None:
     )
 
 
+def launch_question(question: str) -> None:
+    """Неблокуючий запуск відповіді на питання (2026-10-15, рішення
+    користувача "пряме спілкування для будь чого з телеграм і ШІ").
+
+    Той самий контракт, що `launch_job`: `Popen`, не `.run()`.
+    Відповідь триває 5-30 с (виклик LLM), а поллер опитує бота
+    щохвилини й мусить звільняти цикл. Скрипт сам надсилає відповідь —
+    і сам повідомляє про збій, інакше користувач чекав би мовчки.
+
+    Жодної логіки відповіді тут немає (orchestration/CLAUDE.md: нуль
+    бізнес-логіки) — лише виклик `analysis/assistant/`."""
+    subprocess.Popen(
+        [
+            sys.executable,
+            str(REPO_ROOT / "analysis" / "assistant" / "answer_question.py"),
+            "--question", question,
+            "--notify",
+        ],
+        cwd=REPO_ROOT,
+    )
+
+
 def get_offset(conn) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT last_update_id FROM telegram_command_offset WHERE id = 1")
@@ -472,7 +498,15 @@ def process_update(
     text = message["text"]
     command = parse_command(text)
     if command is None:
-        return  # не команда (звичайний текст) — мовчки пропускаємо
+        # Звичайний текст = питання до агента (2026-10-15). Доти
+        # мовчки відкидався. `looks_like_question` відсікає короткі
+        # репліки ("ок", "дякую") — кожне питання це платний виклик.
+        question = looks_like_question(text)
+        if question is None:
+            return
+        launch_question(question)
+        logger.info("Питання від chat_id=%s (%d символів)", chat_id, len(question))
+        return
 
     if command in HELP_COMMANDS:
         send_telegram_message(token, configured_chat_id, format_help(), parse_mode="HTML")
@@ -485,6 +519,17 @@ def process_update(
     elif command == "watchlist_remove":
         reply = handle_watchlist_remove(conn, parse_command_args(text))
         send_telegram_message(token, configured_chat_id, reply, parse_mode="HTML")
+    elif command in ASK_COMMANDS:
+        question = parse_command_args(text)
+        if not question:
+            send_telegram_message(
+                token, configured_chat_id,
+                "Напиши питання після команди або просто текстом: "
+                "<code>/ask що зараз із золотом?</code>",
+                parse_mode="HTML",
+            )
+        else:
+            launch_question(question)
     elif command in INFO_JOB_NAMES:
         launch_job(command)
         send_telegram_message(token, configured_chat_id, format_launch_ack(command), parse_mode="HTML")

@@ -83,6 +83,26 @@ def resolve_telegram_credentials() -> tuple[str, str]:
     return token, chat_id
 
 
+def send_report(text: str, parse_mode: str | None = "HTML") -> None:
+    """Надіслати готовий текст у Telegram — токен і чат беруться з .env.
+
+    **Навіщо хелпер.** `telegram_client.send_telegram_message` має
+    порядок `(token, chat_id, text)`, і це легко переставити: живий баг
+    2026-10-15 — три щойно написані скрипти (`outcomes_notify`,
+    `output_health`, `crosscheck_quotes`) викликали його як
+    `(text, token=..., chat_id=...)`. Тести проходили, бо шлях
+    відправки виконується ЛИШЕ при справжній події: тижневий звіт
+    упав би в понеділок, алерт здоров'я — при першій зміні стану,
+    звірка цін — при першій розбіжності. Класичний тихий дефект цього
+    проєкту: код виглядає робочим і чекає місяць, щоб упасти.
+
+    Тепер викликач передає лише ТЕКСТ, і переставити нема чого."""
+    from telegram_client import send_telegram_message  # noqa: E402
+
+    token, chat_id = resolve_telegram_credentials()
+    send_telegram_message(token, chat_id, text, parse_mode=parse_mode)
+
+
 def fetch_dicts(conn, query: str, params: tuple = ()) -> list[dict]:
     """Рядки запиту як list[dict] (ключі — імена колонок)."""
     with conn.cursor() as cur:

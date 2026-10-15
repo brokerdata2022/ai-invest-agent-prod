@@ -39,9 +39,8 @@ sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "data-ingestion"))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "monitoring"))
 
-from _common import bold, resolve_telegram_credentials  # noqa: E402
+from _common import bold, send_report  # noqa: E402
 from common.db import get_connection  # noqa: E402
-from telegram_client import send_telegram_message  # noqa: E402
 
 import config  # noqa: E402
 from _outcomes_db import fetch_hit_rates  # noqa: E402
@@ -139,8 +138,7 @@ def main() -> None:
         print(message)
         return
 
-    token, chat_id = resolve_telegram_credentials()
-    send_telegram_message(message, token=token, chat_id=chat_id)
+    send_report(message)
     logger.info("Звіт про якість рішень надіслано (%d видів)", len(rows))
 
 

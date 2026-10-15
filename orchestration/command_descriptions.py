@@ -73,6 +73,7 @@ JOB_DESCRIPTIONS: dict[str, str] = {
 # джоби з JOBS (своя гілка в telegram_commands.py:process_update()),
 # але так само потребують назви+опису в "/"-меню Telegram і на /help.
 SPECIAL_COMMAND_DESCRIPTIONS: dict[str, str] = {
+    "ask": "Запитати агента про його дані (можна й просто текстом, без команди)",
     "watchlist_list": "Показати поточний watchlist",
     "watchlist_add": "Додати актив у watchlist (пробує Twelve Data, потім Binance)",
     "watchlist_remove": "Вимкнути актив з watchlist",

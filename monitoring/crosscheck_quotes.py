@@ -235,11 +235,9 @@ def main() -> None:
         return
 
     if args.notify:
-        from _common import resolve_telegram_credentials  # noqa: E402
-        from telegram_client import send_telegram_message  # noqa: E402
+        from _common import send_report  # noqa: E402
 
-        token, chat_id = resolve_telegram_credentials()
-        send_telegram_message(format_alert(mismatches), token=token, chat_id=chat_id)
+        send_report(format_alert(mismatches))
         logger.info("Надіслано алерт про %d розбіжностей", len(mismatches))
 
 
