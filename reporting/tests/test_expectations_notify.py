@@ -75,19 +75,19 @@ _BASE_ROW = {
 
 def test_shows_agent_forecast_next_to_fact_and_consensus():
     """Доти прогноз агента жив в ОКРЕМОМУ повідомленні, і порівняти
-    "ми проти консенсусу" можна було лише SQL-запитом."""
+    "ми проти календарного" можна було лише SQL-запитом."""
     row = {
         **_BASE_ROW,
         "forecast_value_parsed": 0.2301,
         "forecast_method": "llm",
-        "forecast_verdict": "farther_than_market",
+        "forecast_verdict": "farther_than_calendar",
     }
     text = format_message([row])
 
     assert "0.6485" in text          # факт
-    assert "0.6" in text             # консенсус
+    assert "0.6" in text             # прогноз із календаря
     assert "0.2301" in text          # наш прогноз
-    assert "далі за консенсус" in text
+    assert "менш точний, ніж календарний" in text
     assert "ШІ" in text              # чим зроблено прогноз
 
 
@@ -101,15 +101,16 @@ def test_says_plainly_when_there_was_no_forecast():
     assert "прогнозу на цей реліз не було" in text
 
 
-def test_market_expectation_is_called_consensus_not_forecast():
-    """Два різні числа не можуть називатись одним словом: нижче стоїть
-    НАШ прогноз (живий огляд формату 2026-10-15)."""
+def test_calendar_forecast_is_named_by_its_source():
+    """Два різні числа не можуть називатись одним словом, і назва має
+    казати ЗВІДКИ число (рішення користувача 2026-10-15: "консенсус не
+    ясно — краща назва прогноз з календаря")."""
     row = {**_BASE_ROW, "forecast_value_parsed": 0.23,
-           "forecast_method": "llm", "forecast_verdict": "closer_than_market"}
+           "forecast_method": "llm", "forecast_verdict": "closer_than_calendar"}
     text = format_message([row])
 
-    assert "vs консенсус" in text
-    assert "(прогноз:" not in text
+    assert "vs прогноз з календаря" in text
+    assert "консенсус" not in text
 
 
 def test_older_rows_without_forecast_columns_still_render():

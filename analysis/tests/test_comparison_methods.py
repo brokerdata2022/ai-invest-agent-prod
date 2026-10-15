@@ -6,7 +6,7 @@ from expectations.comparison_methods import (
     FARTHER,
     REQUIRED_OBSERVATIONS,
     TIE,
-    compare_to_market,
+    compare_to_calendar,
     compute_actual,
     forecast_in_comparison_units,
 )
@@ -94,19 +94,19 @@ def test_forecast_none_without_observations():
     assert forecast_in_comparison_units("mom_pct", 100.0, []) is None
 
 
-def test_market_closer_when_its_error_smaller():
-    assert compare_to_market(actual=0.6485, forecast=0.2301, expected=0.6) == FARTHER
+def test_calendar_closer_when_its_error_smaller():
+    assert compare_to_calendar(actual=0.6485, forecast=0.2301, expected=0.6) == FARTHER
 
 
 def test_agent_closer_when_its_error_smaller():
-    assert compare_to_market(actual=0.65, forecast=0.64, expected=0.40) == CLOSER
+    assert compare_to_calendar(actual=0.65, forecast=0.64, expected=0.40) == CLOSER
 
 
 def test_tie_on_equal_errors():
-    assert compare_to_market(actual=1.0, forecast=0.9, expected=1.1) == TIE
+    assert compare_to_calendar(actual=1.0, forecast=0.9, expected=1.1) == TIE
 
 
 def test_no_verdict_without_forecast():
     """Відсутність прогнозу — не поразка агента, а відсутність
     твердження (той самий принцип, що no_claim у журналі наслідків)."""
-    assert compare_to_market(actual=1.0, forecast=None, expected=1.1) is None
+    assert compare_to_calendar(actual=1.0, forecast=None, expected=1.1) is None

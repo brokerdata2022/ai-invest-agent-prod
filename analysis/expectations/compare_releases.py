@@ -35,7 +35,7 @@ from expectations.comparison_methods import (  # noqa: E402
     COMPARISON_METHOD,
     RAW_UNIT_SCALE,
     REQUIRED_OBSERVATIONS,
-    compare_to_market,
+    compare_to_calendar,
     compute_actual,
     forecast_in_comparison_units,
 )
@@ -106,7 +106,7 @@ def compare_one(conn, entry: dict) -> Optional[ComparisonResult]:
     #
     # Третя точка зору поруч із фактом і ринковим очікуванням. Доти
     # прогноз жив в окремому повідомленні, і порівняти «ми проти
-    # консенсусу» можна було лише SQL-запитом.
+    # календарному» можна було лише SQL-запитом.
     observed_date = observations[0]["observed_at"]
     forecast_row = fetch_prerelease_forecast(conn, entry["source"], metric_id, observed_date)
     forecast_parsed = None
@@ -123,10 +123,10 @@ def compare_one(conn, entry: dict) -> Optional[ComparisonResult]:
             )
             forecast_method = None
 
-    verdict = compare_to_market(actual, forecast_parsed, expected_scaled)
+    verdict = compare_to_calendar(actual, forecast_parsed, expected_scaled)
     if forecast_parsed is not None:
         logger.info(
-            "%s: агент %.4f | ринок %.4f | факт %.4f -> %s",
+            "%s: наш %.4f | календар %.4f | факт %.4f -> %s",
             metric_id, forecast_parsed, expected_scaled, actual, verdict,
         )
     else:

@@ -1384,7 +1384,7 @@ SELECT add_compression_policy('raw_observations', INTERVAL '30 days', if_not_exi
 -- Прогноз агента, факт і ринкове очікування жили в РІЗНИХ
 -- повідомленнях: `forecast_notify.py` шле прогноз, `expectations_notify.py`
 -- — факт проти очікування. Побачити «агент побив naive, але програв
--- консенсусу» можна було лише SQL-запитом.
+-- календарному» можна було лише SQL-запитом.
 --
 -- ЧОМУ ЦЕ НЕ ПРОСТО ФОРМАТУВАННЯ. Прогноз лежить у `metric_forecasts`
 -- РІВНЕМ (cpi 334.9), а порівняння з очікуванням — у m/m % (0.6).
@@ -1402,7 +1402,7 @@ ALTER TABLE expectation_comparisons
     ADD COLUMN IF NOT EXISTS forecast_value_parsed NUMERIC;
 ALTER TABLE expectation_comparisons
     ADD COLUMN IF NOT EXISTS forecast_method TEXT;
--- closer_than_market | farther_than_market | tie — хто був ближчий до
+-- closer_than_calendar | farther_than_calendar | tie — хто був ближчий до
 -- факту. Вердикт зберігається, а не рахується в reporting/: там лише
 -- форматування (reporting/CLAUDE.md).
 ALTER TABLE expectation_comparisons

@@ -94,9 +94,9 @@ def fetch_recent_comparisons(
 # Хто був ближчий до факту. Формулювання описові — звіт не дає
 # інструкцій і не хвалить себе (reporting/CLAUDE.md, "Правило тону").
 _VERDICT_LABEL = {
-    "closer_than_market": "ближче за консенсус",
-    "farther_than_market": "далі за консенсус",
-    "tie": "так само, як консенсус",
+    "closer_than_calendar": "точніший за календарний",
+    "farther_than_calendar": "менш точний, ніж календарний",
+    "tie": "така сама точність, як у календарного",
 }
 
 # `method` із metric_forecasts: показуємо ЧИМ зроблено прогноз, бо
@@ -119,17 +119,19 @@ def format_message(rows: list[dict]) -> str:
         pct_suffix = f" ({row['surprise_pct']:+.1f}%)" if row["surprise_pct"] is not None else ""
         lines.append(bold(f"{label} — {row['observed_at']}"))
         lines.append(
-            # "консенсус", а не "прогноз": нижче стоїть НАШ прогноз, і
-            # два різні числа одним словом читались би як одне
-            # (живий огляд формату 2026-10-15).
-            f"Факт {float(row['actual_value']):.4g} vs консенсус "
+            # "прогноз з календаря", а не "прогноз" і не "консенсус"
+            # (рішення користувача 2026-10-15: "консенсус не ясно").
+            # Нижче стоїть НАШ прогноз, тож два різні числа мусять мати
+            # різні назви — і назва має казати, ЗВІДКИ число:
+            # економічний календар (monitoring/economic_calendar.py).
+            f"Факт {float(row['actual_value']):.4g} vs прогноз з календаря "
             f"{float(row['expected_value_parsed']):.4g} ({escape_html(row['expected_value_raw'])})"
         )
         lines.append(f"Сюрприз: {float(row['surprise']):+.4g}{pct_suffix}")
 
         # ТРИ ЧИСЛА ПОРУЧ (2026-10-15, рішення користувача). Доти
         # прогноз агента жив в окремому повідомленні, і побачити "ми
-        # побили naive, але програли консенсусу" можна було лише
+        # побили naive, але програли календарному" можна було лише
         # SQL-запитом. Обчислення — в analysis/expectations (rule:
         # reporting лише форматує), тут беруться готові поля.
         if row.get("forecast_value_parsed") is not None:

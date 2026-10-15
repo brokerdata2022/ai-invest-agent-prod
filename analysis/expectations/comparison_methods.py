@@ -117,8 +117,8 @@ def compute_actual(method: str, observations: list[dict]) -> Optional[float]:
 # ТРИ ЧИСЛА ПОРУЧ: прогноз агента в одиницях порівняння
 # ============================================================
 
-CLOSER = "closer_than_market"
-FARTHER = "farther_than_market"
+CLOSER = "closer_than_calendar"
+FARTHER = "farther_than_calendar"
 TIE = "tie"
 
 
@@ -148,10 +148,16 @@ def forecast_in_comparison_units(
     return compute_actual(method, substituted)
 
 
-def compare_to_market(
+def compare_to_calendar(
     actual: float, forecast: Optional[float], expected: float
 ) -> Optional[str]:
-    """Хто був ближчий до факту — прогноз агента чи ринкове очікування.
+    """Хто був ближчий до факту — наш прогноз чи прогноз із календаря.
+
+    «Прогноз із календаря», а не «консенсус» (рішення користувача
+    2026-10-15: «консенсус не ясно»): значення приходить із
+    економічного календаря (`monitoring/economic_calendar.py`,
+    ForexFactory-фід), і назвати його тим, чим воно є, зрозуміліше за
+    термін, який треба знати заздалегідь.
 
     `None`, якщо прогнозу не було: це НЕ «агент програв», це
     відсутність твердження, і плутати їх означає псувати статистику
