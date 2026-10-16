@@ -172,7 +172,7 @@ bash scripts/restore_db.sh
 docker compose exec app pytest -q
 ```
 
-Очікується **1484 passed**. Ключі для цього не потрібні — тести
+Очікується **1490 passed**. Ключі для цього не потрібні — тести
 перевіряють код і не торкаються ні мережі, ні бази, тож проходять і
 на незаповненому `.env`. Якщо падають —
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
@@ -389,7 +389,7 @@ docker compose exec app python data-ingestion/apply_schema.py
 docker compose exec app pytest -q
 ```
 
-Очікувано: `1484 passed` за ~10-15 секунд.
+Очікувано: `1490 passed` за ~10-15 секунд.
 
 > **Якщо оновлюєтесь із версії до 2026-10-15** — зверніть увагу:
 > раніше цей самий `pytest` **виконував пʼять джоб по-справжньому**.

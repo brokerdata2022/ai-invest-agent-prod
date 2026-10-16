@@ -20,6 +20,7 @@ from assistant.context import (
     NEWS_BLOCK_CLOSE,
     NEWS_BLOCK_OPEN,
     asset_block,
+    freshness_block,
     general_block,
     price_change,
     truncate,
@@ -186,3 +187,70 @@ def test_reply_survives_missing_answer_field():
     """Модель може віддати неповний JSON — користувач однаково мусить
     отримати щось осмисленe, а не трасування."""
     assert "не дала відповіді" in format_reply({"data_gaps": "усе"})
+
+
+# ============================================================
+# Свіжість даних — захист від підміни бази
+# ============================================================
+#
+# Живий випадок 2026-10-16: користувач отримав відповідь, зібрану з
+# ДЕВ-бази (відновлений знімок від 13.10), і вона виглядала як поточна
+# картина ринку. Дані були найсвіжішими з наявних у ТІЙ базі, тож ні
+# модель, ні користувач не мали звідки дізнатись про відставання.
+
+
+def _fresh(day: int, source: str = "twelvedata") -> dict:
+    return {
+        "source": source,
+        "last_observed": date(2026, 10, day),
+        "last_fetched": datetime(2026, 10, day, 14, 0),
+    }
+
+
+def test_freshness_block_counts_age_in_days():
+    """Вік рахує КОД, а не модель: «15.10 проти 16.10» вона може
+    прочитати як свіже, а «відстає на 1 день» — ні."""
+    text = freshness_block(date(2026, 10, 16), [_fresh(13)])
+
+    assert "3 дн. тому" in text
+
+
+def test_freshness_block_shouts_when_stale():
+    text = freshness_block(date(2026, 10, 16), [_fresh(13)])
+
+    assert "ВІДСТАЄ НА 3 ДН" in text
+    assert "не подавай ці значення як поточну картину" in text
+
+
+def test_freshness_block_quiet_when_fresh():
+    """Збір того ж дня — попередження не потрібне, інакше воно стане
+    шумом і його перестануть читати."""
+    text = freshness_block(date(2026, 10, 16), [_fresh(16)])
+
+    assert "0 дн. тому" in text
+    assert "ВІДСТАЄ" not in text
+
+
+def test_freshness_block_reports_empty_database():
+    text = freshness_block(date(2026, 10, 16), [])
+
+    assert "немає жодного спостереження" in text
+
+
+def test_freshness_uses_worst_source():
+    """Одне свіже джерело не має маскувати три застарілі."""
+    text = freshness_block(date(2026, 10, 16), [_fresh(16, "fred"), _fresh(11)])
+
+    assert "ВІДСТАЄ НА 5 ДН" in text
+
+
+def test_general_block_puts_freshness_before_market_mood():
+    """Порядок у контексті — це пріоритет для моделі: спершу стан
+    даних, потім їхній зміст."""
+    text = general_block(
+        date(2026, 10, 16), [], {"session": "us", "direction": "up", "confidence": 0.4,
+                                 "summary": "s", "created_at": datetime(2026, 10, 13, 13, 50)},
+        None, [], [], freshness=[_fresh(13)],
+    )
+
+    assert text.index("СВІЖІСТЬ ДАНИХ") < text.index("НАСТРІЙ РИНКУ")

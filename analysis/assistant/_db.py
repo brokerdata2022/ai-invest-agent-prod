@@ -77,6 +77,35 @@ def known_tickers(conn) -> set:
 # ============================================================
 
 
+def data_freshness(conn) -> list[dict]:
+    """Коли останній раз збирали дані по ключових джерелах.
+
+    **Навіщо це в КОНТЕКСТІ, а не лише в логах** (живий випадок
+    2026-10-16): користувач отримав відповідь, зібрану з ДЕВ-бази —
+    відновленого знімка від 13.10 — і вона виглядала як поточна
+    картина ринку. Самі дані були найсвіжішими з наявних у ТІЙ базі,
+    тож ні модель, ні користувач не мали звідки дізнатись, що база
+    відстала на три дні.
+
+    Тепер свіжість іде першим блоком контексту, а системний промпт
+    зобов'язує сказати про відставання прямо. Це захист не від
+    помилки моделі, а від підміни бази — і працює незалежно від того,
+    яка саме база підключена."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT source,
+                   max(observed_at) AS last_observed,
+                   max(fetched_at)  AS last_fetched
+            FROM raw_observations
+            WHERE source IN ('twelvedata', 'binance', 'bybit_futures', 'fred', 'yahoo_chart')
+            GROUP BY source
+            ORDER BY max(fetched_at) DESC
+            """
+        )
+        return _dicts(cur)
+
+
 def upcoming_releases(conn, limit: int) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(

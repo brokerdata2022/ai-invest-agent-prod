@@ -47,6 +47,34 @@ def price_change(points: list[dict]) -> Optional[dict]:
     }
 
 
+def freshness_block(today, rows: list[dict]) -> str:
+    """Скільки днів тому збирали дані по ключових джерелах.
+
+    Вік рахується ТУТ, а не покладається на модель: «15.10 проти
+    16.10» вона може прочитати як «свіже», а «застаріло на 3 дні» —
+    ні (живий випадок 2026-10-16: відповідь із дев-бази, відсталої на
+    три дні, виглядала як поточна картина ринку)."""
+    if not rows:
+        return "СВІЖІСТЬ ДАНИХ: у базі немає жодного спостереження — вона порожня"
+
+    lines = ["СВІЖІСТЬ ДАНИХ (скільки днів тому збирали):"]
+    worst = 0
+    for row in rows:
+        age = (today - row["last_fetched"].date()).days
+        worst = max(worst, age)
+        lines.append(
+            f"  {row['source']}: збір {row['last_fetched']:%d.%m %H:%M}, "
+            f"остання дата {row['last_observed']} — {age} дн. тому"
+        )
+    if worst >= 1:
+        lines.append(
+            f"  !! НАЙСТАРІШЕ ДЖЕРЕЛО ВІДСТАЄ НА {worst} ДН. "
+            "Це означає, що збір не працював — скажи про це користувачу ПРЯМО "
+            "й не подавай ці значення як поточну картину ринку."
+        )
+    return "\n".join(lines)
+
+
 def general_block(
     today,
     releases: list[dict],
@@ -54,8 +82,9 @@ def general_block(
     outlook: Optional[dict],
     trading_list: list[dict],
     outcomes: list[dict],
+    freshness: list[dict] | None = None,
 ) -> str:
-    lines = [f"СЬОГОДНІ: {today}"]
+    lines = [f"СЬОГОДНІ: {today}", "", freshness_block(today, freshness or [])]
 
     if market:
         lines.append(
