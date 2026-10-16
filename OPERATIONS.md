@@ -386,7 +386,7 @@ docker compose exec db psql -U invest_agent -d invest_agent -c \
 
 | Таблиця | Зростання | Хто прибирає |
 |---|---|---|
-| `raw_observations` | ~5 200 рядків/добу (ф'ючерси — найбільше) | **ніколи не видаляється** — лише СТИСКАЄТЬСЯ політикою TimescaleDB із 30-го дня. Зміряно на живому чанку: 3280 кБ → 464 кБ (**7.1×**) |
+| `raw_observations` | ~5 200 рядків/добу (ф'ючерси — найбільше) | **ніколи не видаляється.** Компресію пробували 15.10 і **відкотили 16.10** — вона поклала БД (OOM-kill бекендів на плануванні запиту по 512 тикерах). Деталі й умови повторної спроби — `docs/decisions.md`, 2026-10-16 |
 | `llm_call_log` | ~10-30 МБ/міс | джоба `prune_derived`: старші за 120 днів і **без посилань** із 11 таблиць-результатів |
 | `news_consolidated` | тексти, 3×/добу | `prune_derived`, 30 днів |
 | знімкові таблиці (`trading_list`, `screening_results`, …) | десятки МБ | `prune_derived`, 180 днів |
@@ -410,7 +410,7 @@ docker compose logs --tail 30 scheduler | grep prune_derived
 `earnings_calendar`, `release_log`, `watchlist_assets`, `sources`.
 Перелік стережеться тестом — випадково додати туди таблицю не вийде.
 
-Перевірити стиснення вручну:
+Перевірити, що стиснутих чанків НЕМА (після відкату 16.10 має бути 0):
 
 ```bash
 docker compose exec db psql -U invest_agent -d invest_agent -c \
@@ -419,6 +419,11 @@ docker compose exec db psql -U invest_agent -d invest_agent -c \
      from timescaledb_information.chunks
     where hypertable_name = 'raw_observations'"
 ```
+
+Якщо `compressed` більше нуля — запусти
+`bash scripts/decompress_raw_observations.sh`: це ознака, що база ще
+не відкочена, і джоби скринінгу падатимуть з
+`server closed the connection unexpectedly`.
 
 ---
 
@@ -494,4 +499,4 @@ diff /tmp/before.txt /tmp/after.txt
 ```
 
 Вивід **не змінився** там, де мусив, — або всі значення **однакові** —
-це і є дефект, навіть якщо всі 1483 тести зелені.
+це і є дефект, навіть якщо всі 1484 тести зелені.

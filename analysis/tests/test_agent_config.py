@@ -281,3 +281,34 @@ def test_output_health_checks_are_well_formed():
         assert 0.0 <= check["max_null_share"] <= 1.0
         assert isinstance(check["vary"], tuple)
         assert isinstance(check["required"], tuple)
+
+
+# ============================================================
+# Компресія raw_observations — НЕ вмикати без виконаних умов
+# ============================================================
+
+
+def test_schema_does_not_enable_compression():
+    """Регресія на живий збій у продакшені 2026-10-16.
+
+    Компресія, увімкнена 15.10, стиснула 1205 із 1211 чанків — і через
+    9 годин ядро почало вбивати бекенди Postgres (signal 9) на
+    ПЛАНУВАННІ запиту по 512 metric_id: `v_current_values` це
+    `DISTINCT ON` без межі по даті, тож торкається всіх чанків, а
+    кожен стиснутий додає власні вузли розпакування (зміряно: 40
+    metric_id -> 8515 вузлів плану, 4.2 с планування).
+
+    Умови, за яких компресію можна вмикати знову, перелічені в
+    `db/schema.sql`. Цей тест падає, якщо хтось (включно зі мною)
+    увімкне її, не виконавши їх."""
+    from pathlib import Path
+
+    schema = Path(__file__).resolve().parents[2] / "db" / "schema.sql"
+    text = schema.read_text(encoding="utf-8")
+
+    assert "add_compression_policy" not in text, (
+        "Компресію відкочено 2026-10-16 після OOM у продакшені — "
+        "умови повторного ввімкнення див. db/schema.sql"
+    )
+    assert "timescaledb.compress = true" not in text
+    assert "timescaledb.compress," not in text
