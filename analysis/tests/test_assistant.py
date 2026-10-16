@@ -215,11 +215,37 @@ def test_freshness_block_counts_age_in_days():
     assert "3 дн. тому" in text
 
 
-def test_freshness_block_shouts_when_stale():
-    text = freshness_block(date(2026, 10, 16), [_fresh(13)])
+def test_whole_collection_stalled_is_loud():
+    """Навіть найсвіжіше джерело старше за добу — щогодинні джоби не
+    можуть пропустити добу при робочому планувальнику."""
+    text = freshness_block(date(2026, 10, 16), [_fresh(13), _fresh(12, "fred")])
 
-    assert "ВІДСТАЄ НА 3 ДН" in text
+    assert "ЗБІР СТОЯВ" in text
     assert "не подавай ці значення як поточну картину" in text
+
+
+def test_daily_weekday_source_one_day_old_is_not_an_alarm():
+    """РЕГРЕСІЯ на хибне спрацювання, помічене перед показом
+    користувачу: денні серії FRED збираються раз на добу по БУДНЯХ, тож
+    у п'ятницю зранку вік `fred` законно дорівнює 1 дню. Поріг «будь-яке
+    джерело старше за добу» видавав тривогу «збір не працював» у КОЖНІЙ
+    відповіді — і попередження знецінилось би за день."""
+    text = freshness_block(
+        date(2026, 10, 16),
+        [_fresh(16, "binance"), _fresh(16, "twelvedata"), _fresh(15, "fred")],
+    )
+
+    assert "!!" not in text
+    assert "1 дн. тому" in text
+
+
+def test_single_stuck_source_named_without_global_alarm():
+    """Одне застрягле джерело при свіжій решті — це інший факт, ніж
+    «збір стояв», і звучати має інакше."""
+    text = freshness_block(date(2026, 10, 16), [_fresh(16, "binance"), _fresh(11, "fred")])
+
+    assert "ОКРЕМІ ДЖЕРЕЛА ЗАСТРЯГЛИ: fred (5 дн.)" in text
+    assert "ЗБІР СТОЯВ" not in text
 
 
 def test_freshness_block_quiet_when_fresh():
@@ -228,20 +254,13 @@ def test_freshness_block_quiet_when_fresh():
     text = freshness_block(date(2026, 10, 16), [_fresh(16)])
 
     assert "0 дн. тому" in text
-    assert "ВІДСТАЄ" not in text
+    assert "!!" not in text
 
 
 def test_freshness_block_reports_empty_database():
     text = freshness_block(date(2026, 10, 16), [])
 
     assert "немає жодного спостереження" in text
-
-
-def test_freshness_uses_worst_source():
-    """Одне свіже джерело не має маскувати три застарілі."""
-    text = freshness_block(date(2026, 10, 16), [_fresh(16, "fred"), _fresh(11)])
-
-    assert "ВІДСТАЄ НА 5 ДН" in text
 
 
 def test_general_block_puts_freshness_before_market_mood():

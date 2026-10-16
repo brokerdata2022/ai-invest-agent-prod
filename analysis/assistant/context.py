@@ -47,30 +47,57 @@ def price_change(points: list[dict]) -> Optional[dict]:
     }
 
 
-def freshness_block(today, rows: list[dict]) -> str:
+def freshness_block(
+    today,
+    rows: list[dict],
+    stale_source_days: int = 3,
+    stale_all_days: int = 1,
+) -> str:
     """Скільки днів тому збирали дані по ключових джерелах.
 
     Вік рахується ТУТ, а не покладається на модель: «15.10 проти
-    16.10» вона може прочитати як «свіже», а «застаріло на 3 дні» —
-    ні (живий випадок 2026-10-16: відповідь із дев-бази, відсталої на
-    три дні, виглядала як поточна картина ринку)."""
+    16.10» вона може прочитати як «свіже», а «відстає на 3 дні» — ні
+    (живий випадок 2026-10-16: відповідь із дев-бази, відсталої на три
+    дні, виглядала як поточна картина ринку).
+
+    **Два різні пороги, бо це два різні факти.** Перша версія мала один
+    («будь-яке джерело старше за добу → тривога») і одразу дала хибне
+    спрацювання на продакшені: денні серії FRED збираються раз на добу
+    по БУДНЯХ, тож у п'ятницю зранку вік `fred` законно дорівнює 1 дню.
+    Попередження в кожній відповіді знецінило б себе за день. Тепер:
+    - окреме джерело згадується як застрягле лише після
+      `stale_source_days` (дефолт 3);
+    - загальна тривога — лише коли НАВІТЬ НАЙСВІЖІШЕ джерело старше за
+      `stale_all_days` (дефолт 1), бо щогодинні джоби не можуть
+      пропустити добу при робочому планувальнику.
+    """
     if not rows:
         return "СВІЖІСТЬ ДАНИХ: у базі немає жодного спостереження — вона порожня"
 
     lines = ["СВІЖІСТЬ ДАНИХ (скільки днів тому збирали):"]
-    worst = 0
+    ages: list[tuple[int, str]] = []
     for row in rows:
         age = (today - row["last_fetched"].date()).days
-        worst = max(worst, age)
+        ages.append((age, row["source"]))
         lines.append(
             f"  {row['source']}: збір {row['last_fetched']:%d.%m %H:%M}, "
             f"остання дата {row['last_observed']} — {age} дн. тому"
         )
-    if worst >= 1:
+
+    newest_age = min(age for age, _ in ages)
+    stuck = sorted((source, age) for age, source in ages if age >= stale_source_days)
+
+    if newest_age >= stale_all_days:
         lines.append(
-            f"  !! НАЙСТАРІШЕ ДЖЕРЕЛО ВІДСТАЄ НА {worst} ДН. "
-            "Це означає, що збір не працював — скажи про це користувачу ПРЯМО "
-            "й не подавай ці значення як поточну картину ринку."
+            f"  !! ЗБІР СТОЯВ: навіть найсвіжіше джерело відстає на {newest_age} дн. "
+            "Скажи про це користувачу ПРЯМО й не подавай ці значення як поточну "
+            "картину ринку."
+        )
+    elif stuck:
+        listed = ", ".join(f"{source} ({age} дн.)" for source, age in stuck)
+        lines.append(
+            f"  !! ОКРЕМІ ДЖЕРЕЛА ЗАСТРЯГЛИ: {listed}. Решта свіжа — згадай це "
+            "там, де відповідь спирається саме на них."
         )
     return "\n".join(lines)
 
@@ -83,8 +110,14 @@ def general_block(
     trading_list: list[dict],
     outcomes: list[dict],
     freshness: list[dict] | None = None,
+    stale_source_days: int = 3,
+    stale_all_days: int = 1,
 ) -> str:
-    lines = [f"СЬОГОДНІ: {today}", "", freshness_block(today, freshness or [])]
+    lines = [
+        f"СЬОГОДНІ: {today}",
+        "",
+        freshness_block(today, freshness or [], stale_source_days, stale_all_days),
+    ]
 
     if market:
         lines.append(
