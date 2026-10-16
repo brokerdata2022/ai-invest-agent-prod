@@ -39,7 +39,7 @@ sys.path.insert(0, _ANALYSIS_DIR)
 sys.path.insert(0, os.path.join(_ANALYSIS_DIR, "..", "data-ingestion"))
 
 from common.db import get_connection  # noqa: E402
-from screening._batch_db import batch_series  # noqa: E402
+from screening._batch_db import batch_series, calendar_days_for  # noqa: E402
 from screening._results_db import save_screening_run  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 # логіка воронки, не числа.
 from config import (  # noqa: E402
     MOMENTUM_DAYS,
+    SCREENING_PRICE_CALENDAR_BUFFER_DAYS,
     WEIGHT_AVG_DOLLAR_VOLUME,
     WEIGHT_EPS_GROWTH,
     WEIGHT_MOMENTUM,
@@ -242,8 +243,15 @@ def _fetch_price_context(conn, tickers: list[str]) -> dict[str, dict]:
 
     close_ids = [f"{t.lower()}_close" for t in tickers]
     volume_ids = [f"{t.lower()}_volume" for t in tickers]
-    closes_by_metric = batch_series(conn, "twelvedata", close_ids, limit_per_metric=2)
-    volumes_by_metric = batch_series(conn, "twelvedata", volume_ids, limit_per_metric=2)
+    # Межа дати (2026-10-16): дві останні торгові точки лежать у межах
+    # пари тижнів, але свята дають розриви — беремо квартал із запасом.
+    recent_window = calendar_days_for(2, SCREENING_PRICE_CALENDAR_BUFFER_DAYS) + 60
+    closes_by_metric = batch_series(
+        conn, "twelvedata", close_ids, limit_per_metric=2, max_age_days=recent_window
+    )
+    volumes_by_metric = batch_series(
+        conn, "twelvedata", volume_ids, limit_per_metric=2, max_age_days=recent_window
+    )
 
     context: dict[str, dict] = {}
     for ticker in tickers:
@@ -286,7 +294,12 @@ def _fetch_momentum(conn, tickers: list[str]) -> dict[str, Decimal]:
     close_ids = [f"{t.lower()}_close" for t in tickers]
     # +1 точка: щоб порівняти ОСТАННЄ закриття з тим, що було
     # MOMENTUM_DAYS тому, потрібно MOMENTUM_DAYS+1 спостережень.
-    series = batch_series(conn, "twelvedata", close_ids, limit_per_metric=MOMENTUM_DAYS + 1)
+    series = batch_series(
+        conn, "twelvedata", close_ids, limit_per_metric=MOMENTUM_DAYS + 1,
+        max_age_days=calendar_days_for(
+            MOMENTUM_DAYS + 1, SCREENING_PRICE_CALENDAR_BUFFER_DAYS
+        ),
+    )
 
     out: dict[str, Decimal] = {}
     for ticker in tickers:

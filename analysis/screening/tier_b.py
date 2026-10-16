@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 # логіка воронки, не числа.
 from config import (  # noqa: E402
     MAX_LIABILITIES_TO_ASSETS,
+    SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
     MAX_SHARES_YOY,
     MIN_EPS_YOY,
     MIN_PROFITABLE_QUARTERS,
@@ -159,12 +160,30 @@ def run_tier_b(tier_a_tickers: Optional[list[str]] = None) -> list[TierBResult]:
         # 6 batched-запитів на ВЕСЬ список тикерів замість 6*N окремих
         # (docs/decisions.md, 2026-09-25) — по одному на кожен концепт
         # SEC EDGAR, а не по одному на (тикер, концепт).
-        net_income_by = batch_series(conn, "sec_edgar", [f"{t}_net_income" for t in tier_a_tickers])
-        revenue_by = batch_series(conn, "sec_edgar", [f"{t}_revenue" for t in tier_a_tickers])
-        eps_by = batch_series(conn, "sec_edgar", [f"{t}_eps_diluted" for t in tier_a_tickers])
-        shares_by = batch_series(conn, "sec_edgar", [f"{t}_shares_outstanding" for t in tier_a_tickers])
-        liabilities_by = batch_series(conn, "sec_edgar", [f"{t}_liabilities" for t in tier_a_tickers])
-        assets_by = batch_series(conn, "sec_edgar", [f"{t}_assets" for t in tier_a_tickers])
+        net_income_by = batch_series(
+            conn, "sec_edgar", [f"{t}_net_income" for t in tier_a_tickers],
+            max_age_days=SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
+        )
+        revenue_by = batch_series(
+            conn, "sec_edgar", [f"{t}_revenue" for t in tier_a_tickers],
+            max_age_days=SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
+        )
+        eps_by = batch_series(
+            conn, "sec_edgar", [f"{t}_eps_diluted" for t in tier_a_tickers],
+            max_age_days=SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
+        )
+        shares_by = batch_series(
+            conn, "sec_edgar", [f"{t}_shares_outstanding" for t in tier_a_tickers],
+            max_age_days=SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
+        )
+        liabilities_by = batch_series(
+            conn, "sec_edgar", [f"{t}_liabilities" for t in tier_a_tickers],
+            max_age_days=SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
+        )
+        assets_by = batch_series(
+            conn, "sec_edgar", [f"{t}_assets" for t in tier_a_tickers],
+            max_age_days=SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
+        )
 
         passed: list[TierBResult] = []
         for ticker in tier_a_tickers:

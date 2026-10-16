@@ -41,7 +41,11 @@ _ANALYSIS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ANALYSIS_DIR)  # для "from screening._batch_db import ..."
 sys.path.insert(0, os.path.join(_ANALYSIS_DIR, "..", "data-ingestion"))
 from common.db import get_connection  # noqa: E402
-from screening._batch_db import batch_latest_values, batch_series  # noqa: E402
+from screening._batch_db import (  # noqa: E402
+    batch_latest_values,
+    batch_series,
+    calendar_days_for,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -51,6 +55,8 @@ logger = logging.getLogger(__name__)
 # логіка воронки, не числа.
 from config import (  # noqa: E402
     LOOKBACK_DAYS,
+    SCREENING_LATEST_PRICE_MAX_AGE_DAYS,
+    SCREENING_PRICE_CALENDAR_BUFFER_DAYS,
     MIN_AVG_DOLLAR_VOLUME,
     MIN_MARKET_CAP,
     MIN_PRICE,
@@ -116,10 +122,24 @@ def run_tier_a() -> list[TierAResult]:
 
         # 4 batched-запити на ВЕСЬ список тикерів замість 3*N окремих —
         # це і є фікс N+1 (docs/decisions.md, 2026-09-25).
-        prices = batch_latest_values(conn, "twelvedata", close_ids)
+        prices = batch_latest_values(
+            conn, "twelvedata", close_ids,
+            max_age_days=SCREENING_LATEST_PRICE_MAX_AGE_DAYS,
+        )
         shares_by_ticker = batch_latest_values(conn, "sec_edgar", shares_ids)
-        closes_by_ticker = batch_series(conn, "twelvedata", close_ids, limit_per_metric=LOOKBACK_DAYS)
-        volumes_by_ticker = batch_series(conn, "twelvedata", volume_ids, limit_per_metric=LOOKBACK_DAYS)
+        # Межа дати (2026-10-16): LOOKBACK_DAYS — це ТОРГОВІ точки, межа
+        # потрібна в календарних днях, тож переводимо з запасом.
+        price_window = calendar_days_for(
+            LOOKBACK_DAYS, SCREENING_PRICE_CALENDAR_BUFFER_DAYS
+        )
+        closes_by_ticker = batch_series(
+            conn, "twelvedata", close_ids,
+            limit_per_metric=LOOKBACK_DAYS, max_age_days=price_window,
+        )
+        volumes_by_ticker = batch_series(
+            conn, "twelvedata", volume_ids,
+            limit_per_metric=LOOKBACK_DAYS, max_age_days=price_window,
+        )
 
         passed: list[TierAResult] = []
         skipped_no_shares = []

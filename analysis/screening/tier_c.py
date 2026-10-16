@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 # логіка воронки, не числа.
 from config import (  # noqa: E402
     MAX_PE,
+    SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
     MAX_PEG,
     MAX_PS,
     MIN_PE,
@@ -157,8 +158,14 @@ def run_tier_c(tier_a_results=None, tier_b_results=None) -> list[TierCResult]:
         tickers = [b.ticker.lower() for b in tier_b_results]
         # 2 batched-запити на ВЕСЬ список тикерів замість 2*N окремих
         # (docs/decisions.md, 2026-09-25).
-        eps_by = batch_series(conn, "sec_edgar", [f"{t}_eps_diluted" for t in tickers])
-        revenue_by = batch_series(conn, "sec_edgar", [f"{t}_revenue" for t in tickers])
+        eps_by = batch_series(
+            conn, "sec_edgar", [f"{t}_eps_diluted" for t in tickers],
+            max_age_days=SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
+        )
+        revenue_by = batch_series(
+            conn, "sec_edgar", [f"{t}_revenue" for t in tickers],
+            max_age_days=SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
+        )
 
         for b in tier_b_results:
             ticker = b.ticker
