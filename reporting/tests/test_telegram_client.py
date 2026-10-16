@@ -20,6 +20,10 @@ class _FakeResponse:
 
 
 def test_send_telegram_message_without_parse_mode_omits_it(monkeypatch):
+    # Емулюємо ПРОДАКШЕН: там AGENT_ENV не задано, тож транспорт шле.
+    # Без цього тест залежав би від .env машини, на якій запущений
+    # (у дев-контейнері AGENT_ENV=dev — і відправка свідомо блокується).
+    monkeypatch.delenv("AGENT_ENV", raising=False)
     captured = {}
 
     def fake_post(url, data, timeout):
@@ -35,6 +39,7 @@ def test_send_telegram_message_without_parse_mode_omits_it(monkeypatch):
 
 
 def test_send_telegram_message_with_parse_mode_includes_it(monkeypatch):
+    monkeypatch.delenv("AGENT_ENV", raising=False)
     captured = {}
 
     def fake_post(url, data, timeout):
@@ -102,3 +107,61 @@ def test_set_my_commands_posts_commands_payload(monkeypatch):
 
     assert captured["json"] == {"commands": commands}
     assert "setMyCommands" in captured["url"]
+
+
+# ============================================================
+# Запобіжник середовища (2026-10-16)
+# ============================================================
+#
+# Живий випадок: дев і продакшен мають ОДИН токен бота, і ручний
+# прогін у деві надіслав користувачу відповідь, зібрану з дев-бази —
+# знімка триденної давності, зовні невідрізнимого від справжнього
+# звіту агента.
+
+import pytest
+
+from telegram_client import NON_PRODUCTION_ENVS, is_sending_blocked, send_telegram_message
+
+
+@pytest.mark.parametrize("env", sorted(NON_PRODUCTION_ENVS))
+def test_non_production_env_blocks_sending(monkeypatch, env):
+    monkeypatch.setenv("AGENT_ENV", env)
+
+    assert is_sending_blocked() == env
+
+
+@pytest.mark.parametrize("env", ["", "production", "prod", "PRODUCTION", "  "])
+def test_production_and_unset_allow_sending(monkeypatch, env):
+    """Асиметрія навмисна: якби дозволялось лише явно позначене
+    'production', відсутність змінної в продакшен-.env ТИХО вимкнула б
+    усі сповіщення агента."""
+    monkeypatch.setenv("AGENT_ENV", env)
+
+    assert is_sending_blocked() is None
+
+
+def test_unset_variable_allows_sending(monkeypatch):
+    monkeypatch.delenv("AGENT_ENV", raising=False)
+
+    assert is_sending_blocked() is None
+
+
+def test_case_and_spaces_do_not_bypass_the_guard(monkeypatch):
+    monkeypatch.setenv("AGENT_ENV", "  DeV  ")
+
+    assert is_sending_blocked() == "dev"
+
+
+def test_blocked_send_makes_no_http_call(monkeypatch):
+    """Головне: у заблокованому середовищі мережевого виклику НЕМА
+    взагалі — не «надіслали й проігнорували відповідь»."""
+    called = []
+    monkeypatch.setenv("AGENT_ENV", "dev")
+    monkeypatch.setattr(
+        "telegram_client.requests.post",
+        lambda *args, **kwargs: called.append(args) or (_ for _ in ()).throw(AssertionError("не має викликатись")),
+    )
+    result = send_telegram_message("token:123", "42", "текст")
+
+    assert result == {"ok": False, "skipped_env": "dev"}
+    assert called == []

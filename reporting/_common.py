@@ -83,7 +83,7 @@ def resolve_telegram_credentials() -> tuple[str, str]:
     return token, chat_id
 
 
-def send_report(text: str, parse_mode: str | None = "HTML") -> None:
+def send_report(text: str, parse_mode: str | None = "HTML") -> dict:
     """Надіслати готовий текст у Telegram — токен і чат беруться з .env.
 
     **Навіщо хелпер.** `telegram_client.send_telegram_message` має
@@ -100,7 +100,10 @@ def send_report(text: str, parse_mode: str | None = "HTML") -> None:
     from telegram_client import send_telegram_message  # noqa: E402
 
     token, chat_id = resolve_telegram_credentials()
-    send_telegram_message(token, chat_id, text, parse_mode=parse_mode)
+    # Повертаємо результат, щоб викличник не писав "надіслано", коли
+    # транспорт відправку ПРОПУСТИВ (AGENT_ENV=dev) — суперечливі два
+    # рядки в лозі коштують дорожче за один зайвий return.
+    return send_telegram_message(token, chat_id, text, parse_mode=parse_mode)
 
 
 def fetch_dicts(conn, query: str, params: tuple = ()) -> list[dict]:

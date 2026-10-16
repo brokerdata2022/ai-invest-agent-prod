@@ -254,8 +254,15 @@ def main() -> None:
     # Обрізання до TELEGRAM_LIMIT: модель попереджена "до 8 речень",
     # але це прохання, не гарантія, а довше за 4096 символів Telegram
     # відкидає ВСЕ повідомлення — користувач лишився б без відповіді.
-    send_report(_fit_telegram(reply), parse_mode=None)
-    logger.info("Відповідь надіслано (%d символів)", len(reply))
+    result = send_report(_fit_telegram(reply), parse_mode=None)
+    if result.get("skipped_env"):
+        logger.info(
+            "Відповідь готова (%d символів), але НЕ надіслана: середовище %s",
+            len(reply), result["skipped_env"],
+        )
+        print(reply)
+    else:
+        logger.info("Відповідь надіслано (%d символів)", len(reply))
 
 
 if __name__ == "__main__":
