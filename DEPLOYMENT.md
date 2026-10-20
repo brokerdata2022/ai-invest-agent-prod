@@ -68,9 +68,15 @@ docker compose version
 | `TELEGRAM_BOT_TOKEN` | для звітів | [@BotFather](https://t.me/BotFather) | так |
 | `TELEGRAM_CHAT_ID` | для звітів | [@userinfobot](https://t.me/userinfobot) | так |
 | `ESTAT_APP_ID` | для CPI Японії | [e-stat.go.jp](https://www.e-stat.go.jp) | так |
+| `EIA_API_KEY` | **так** (запаси нафти й газу, видобуток OPEC) | [eia.gov/opendata](https://www.eia.gov/opendata/register.php) | так |
+| `MET_NORWAY_USER_AGENT` | ні (порожньо — береться `SEC_EDGAR_USER_AGENT`) | `назва контакт@email` | так |
 
-ECB, BOJ, Binance, CoinGecko, Bybit, OKX, GDELT і всі RSS — **без
-ключів**, публічні ендпоінти.
+ECB, BOJ, Binance, CoinGecko, Bybit, OKX, GDELT, усі RSS, а також
+джерела специфічних даних активів (CoinMetrics, Farside, ICE, USDA
+PSD, iShares, SPDR, Мінфін Японії, Beacon/Solana RPC, Open-Meteo,
+MET Norway) — **без ключів**, публічні ендпоінти. Без `EIA_API_KEY`
+збір запасів падає на спільний `DEMO_KEY`, який вичерпується за
+кілька запитів, — джоба `factor_series` тоді голосно провалюється.
 
 Без `TELEGRAM_*` агент працює й пише в базу, але звітів ви не
 побачите. Без `ANTHROPIC_API_KEY` прогноз і людські висновки
@@ -119,7 +125,7 @@ docker compose up -d --build
 |---|---|
 | `db` | PostgreSQL 16 + TimescaleDB, порт тільки на `127.0.0.1` |
 | `app` | контейнер із кодом; `sleep infinity`, для ручних команд |
-| `scheduler` | APScheduler — виконує 54 джоби, `restart: unless-stopped` |
+| `scheduler` | APScheduler — виконує 56 джоб, `restart: unless-stopped` |
 
 Перевірити:
 
@@ -172,7 +178,7 @@ bash scripts/restore_db.sh
 docker compose exec app pytest -q
 ```
 
-Очікується **1515 passed**. Ключі для цього не потрібні — тести
+Очікується **1633 passed**. Ключі для цього не потрібні — тести
 перевіряють код і не торкаються ні мережі, ні бази, тож проходять і
 на незаповненому `.env`. Якщо падають —
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
@@ -183,7 +189,7 @@ docker compose exec app pytest -q
 docker compose exec app python orchestration/register_telegram_commands.py
 ```
 
-Наповнює «/»-меню бота назвами й описами всіх 54 джоб. Разова дія
+Наповнює «/»-меню бота назвами й описами всіх 56 джоб. Разова дія
 (повторити лише після додавання нової джоби).
 
 ### Крок 7. Засіяти календар релізів
@@ -203,7 +209,7 @@ docker compose exec app python orchestration/run_job.py refresh_calendar
 docker compose logs --tail 60 scheduler
 ```
 
-У логах мусить бути перелік 54 джоб із часом наступного запуску.
+У логах мусить бути перелік 56 джоб із часом наступного запуску.
 
 Перший живий звіт — найближчою Telegram-джобою за розкладом. Не чекати:
 
@@ -215,22 +221,22 @@ docker compose exec app python orchestration/run_job.py notify_watchlist
 
 ### Після відновлення
 
-**Усі 54 джоби вже працюють** — агент повноцінний, нічого доналаштовувати
+**Усі 56 джоб уже працюють** — агент повноцінний, нічого доналаштовувати
 не треба. Переконатися:
 
 ```bash
-docker compose exec app python orchestration/run_job.py --list   # 48 рядків
-docker compose logs scheduler | grep -c "Added job"              # 48
+docker compose exec app python orchestration/run_job.py --list   # 56 рядків
+docker compose logs scheduler | grep -c "Added job"              # 56
 ```
 
-Що саме робить кожна з 48 — [docs/jobs.md](docs/jobs.md), згруповано за
+Що саме робить кожна з 56 — [docs/jobs.md](docs/jobs.md), згруповано за
 обіцянками агента. Короткий огляд напрямків — [README.md](README.md),
 розділ «Що агент робить».
 
 #### Єдине, що в резерві застаріле
 
 Таблиця нижче — **не** перелік функціоналу, а вичерпний список того,
-що резерв НЕ несе або несе зліпком. Решта 43 джоби тут відсутні саме
+що резерв НЕ несе або несе зліпком. Решта джоб тут відсутні саме
 тому, що їхні дані в резерв увійшли й застарілими не є (скринінг,
 синтези, список для торгів, кандидати, фундаментальний аналіз,
 вердикти бектесту — усе на місці з першої хвилини).
@@ -389,7 +395,7 @@ docker compose exec app python data-ingestion/apply_schema.py
 docker compose exec app pytest -q
 ```
 
-Очікувано: `1515 passed` за ~10-15 секунд.
+Очікувано: `1633 passed` за ~10-15 секунд.
 
 > **Якщо оновлюєтесь із версії до 2026-10-15** — зверніть увагу:
 > раніше цей самий `pytest` **виконував пʼять джоб по-справжньому**.
@@ -409,7 +415,8 @@ docker compose exec app python orchestration/register_telegram_commands.py
 
 Наповнює «/»-меню бота назвами й описами джоб. Потрібно лише коли
 оновлення додало джоби — наприклад, у версії 2026-10-15 їх стало 54
-замість 48 (самоконтроль і календар звітності). Без цього нові
+замість 48 (самоконтроль і календар звітності), у версії 2026-10-20 —
+56 (`factor_series`, `factor_crosscheck`). Без цього нові
 команди все одно працюють, просто не підказуються в меню.
 
 ### 7. Переконатися, що планувальник узявся до роботи

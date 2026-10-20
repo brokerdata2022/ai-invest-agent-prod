@@ -69,6 +69,12 @@ CONSUMERS = {
     "ASSET_FACTORS": ["fundamental/factors.py"],
     "ASSET_FACTOR_GAPS": ["fundamental/factors.py"],
     "DEFAULT_ASSET_FACTORS": ["fundamental/factors.py"],
+    # Факторні ряди й чек-листи для будь-якого активу (2026-10-20).
+    "FACTOR_SERIES": ["fundamental/factors.py", "fundamental/checklist.py"],
+    "CHECKLIST_MAX_FACTORS": ["fundamental/checklist.py"],
+    "CHECKLIST_MIN_FACTORS": ["fundamental/checklist.py"],
+    "CHECKLIST_MAX_GAPS": ["fundamental/checklist.py"],
+    "CHECKLIST_CATALOG_MAX_AGE_DAYS": ["fundamental/checklist.py"],
 }
 
 
@@ -234,6 +240,9 @@ PROTECTED_FROM_PRUNING = (
     "sources",
     "release_log",
     "earnings_calendar",
+    # Чек-листи ШІ для активів без ручного — живуть, доки актив у
+    # watchlist; прибрати означало б щоденне перескладання за гроші
+    "asset_checklists",
 )
 
 

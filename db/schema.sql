@@ -1415,3 +1415,69 @@ ALTER TABLE expectation_comparisons
 -- форматування (reporting/CLAUDE.md).
 ALTER TABLE expectation_comparisons
     ADD COLUMN IF NOT EXISTS forecast_verdict TEXT;
+
+-- ============================================================
+-- ФАКТОРНІ РЯДИ АКТИВІВ І ЧЕК-ЛИСТИ ДЛЯ БУДЬ-ЯКОГО АКТИВУ (2026-10-20)
+-- ============================================================
+-- Рішення користувача: для кожного активу, крім загальних
+-- каталізаторів, потрібні його СПЕЦИФІЧНІ дані (запаси, потоки в ETF,
+-- он-чейн, погода) — зі звіркою на кількох джерелах і контролем
+-- свіжості; і кожен актив, включно з доданим через Telegram, має мати
+-- власний чек-лист чинників (config.py, розділи 27-28).
+
+INSERT INTO sources (name, category, source_type, notes) VALUES
+    ('eia', 'commodities', 'official_primary', 'U.S. Energy Information Administration API v2 — щотижневі запаси нафти без SPR (WCESTUS1) і газу в сховищах (NW2_EPG0_SWO_R48_BCF). EIA_API_KEY, без нього DEMO_KEY (~10 запитів/год на IP). Звірка — тижнева зміна з tradingeconomics'),
+    ('spdr_gld', 'commodities', 'official_primary', 'SPDR Gold Shares — архів емітента (xlsx), тонн золота у фонді GLD щодня. Одне джерело: це власна книга емітента'),
+    ('coinmetrics', 'crypto', 'aggregator', 'CoinMetrics Community API — транзакцій за добу BTC/ETH, без ключа. Для SOL мережевих метрик безкоштовно немає'),
+    ('blockchain_info', 'crypto', 'aggregator', 'blockchain.info Charts API — транзакцій BTC за добу, без ключа, лаг ~6 днів. Друге джерело для звірки з coinmetrics (розкид 0.3-1.8%)'),
+    ('etherscan', 'crypto', 'aggregator', 'Etherscan — CSV графіка щоденних транзакцій ETH, без ключа. Друге джерело для звірки з coinmetrics (живо — точний збіг)'),
+    ('farside', 'crypto', 'unofficial', 'Farside Investors — скрапінг HTML-таблиць щоденних чистих потоків у спотові BTC/ETH-ETF США ($ млн). Одне джерело: зведення по всіх фондах безкоштовно публікує лише Farside'),
+    ('defillama', 'crypto', 'aggregator', 'DefiLlama API — щоденний TVL мережі Solana, без ключа. Одне джерело: інші агрегатори TVL платні або з іншою методологією'),
+    ('open_meteo', 'weather', 'aggregator', 'Open-Meteo — прогноз погоди на 7 днів для погодних індексів товарів (HDD США для газу; мін. температура й опади кавових регіонів Бразилії/Вʼєтнаму), без ключа'),
+    ('met_norway', 'weather', 'official_primary', 'MET Norway Locationforecast 2.0 — друге незалежне джерело прогнозу погоди для звірки з open_meteo. Обовʼязковий User-Agent із контактом'),
+    ('ice', 'commodities', 'official_primary', 'ICE Futures U.S. — щоденний звіт про сертифіковані запаси кави C (xls BIFF, xlrd). Облік веде лише біржа — одне джерело'),
+    ('usda_psd', 'commodities', 'official_primary', 'USDA FAS PSD — відкритий архів psd_coffee_csv.zip без ключа: оцінки врожаю кави Бразилії й Вʼєтнаму за маркетинговий рік, переглядаються двічі на рік'),
+    ('ishares_iau', 'commodities', 'official_primary', 'iShares Gold Trust (IAU) — тонни золота у фонді зі сторінки емітента; перевіряється внутрішня узгодженість тонни ↔ унції'),
+    ('mof_japan', 'macro', 'official_primary', 'Мінфін Японії — CSV валютних інтервенцій із 1991 року (CP932, 100 млн ієн); денні дані публікуються щокварталу'),
+    ('beacon_lighthouse', 'crypto', 'official_primary', 'Консенсусний шар Ethereum через вузол Lighthouse (publicnode.com) — баланс активних валідаторів, тобто обсяг ETH у стейкінгу. Дані самого блокчейну, один вузол'),
+    ('solana_publicnode', 'crypto', 'official_primary', 'Solana RPC (publicnode.com) — темп не-голосувальних транзакцій за останні 240 зразків (~4 год)'),
+    ('solana_mainnet', 'crypto', 'official_primary', 'Solana RPC (офіційний api.mainnet-beta.solana.com) — друге джерело для звірки з solana_publicnode, те саме вікно')
+ON CONFLICT (name) DO NOTHING;
+
+-- Вердикт звірки факторного ряду між джерелами (common/consensus.py)
+-- на дату останньої спільної точки. Похідне: перераховується щодня з
+-- raw_observations (monitoring/crosscheck_factors.py), прибирається
+-- prune_derived. Читається аналізом, щоб поруч із числами в промпті
+-- стояло, наскільки їм можна вірити.
+CREATE TABLE IF NOT EXISTS factor_verdicts (
+    metric_id      TEXT NOT NULL,
+    observed_at    DATE NOT NULL,
+    -- agree | outlier | disagree | insufficient (одне джерело)
+    status         TEXT NOT NULL,
+    consensus      NUMERIC,
+    max_spread_pct NUMERIC,
+    -- {джерело: значення}; для compare='diff' — уже приведені до зміни
+    source_values  JSONB,
+    detail         TEXT,
+    checked_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- коли про розбіжність по цій точці вже надіслано тривогу
+    notified_at    TIMESTAMPTZ,
+    PRIMARY KEY (metric_id, observed_at)
+);
+
+-- Чек-лист чинників, складений ШІ для активу без ручного чек-листа в
+-- config.ASSET_FACTORS. Один рядок на актив; складається наново, коли
+-- змінився каталог доступних рядів (catalog_fingerprint), а не щодня.
+-- Не прибирається за розкладом: живе, доки актив у watchlist.
+CREATE TABLE IF NOT EXISTS asset_checklists (
+    asset_id            TEXT PRIMARY KEY,
+    -- [[ключ, підпис], ...] у порядку промпта, вже перевірені каталогом
+    factors             JSONB NOT NULL,
+    -- драйвери, яких у каталозі немає (чесні прогалини)
+    gaps                JSONB NOT NULL,
+    -- ключі, які ШІ запропонував, але їх немає в каталозі (аудит)
+    rejected            JSONB,
+    catalog_fingerprint TEXT NOT NULL,
+    llm_call_id         BIGINT REFERENCES llm_call_log (id),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);

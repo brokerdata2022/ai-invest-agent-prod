@@ -90,6 +90,7 @@ def reconcile(
     metric_id: str,
     values: list[SourceValue],
     tolerance_pct: Decimal,
+    abs_tolerance: Optional[Decimal] = None,
 ) -> ConsensusVerdict:
     """Вердикт по одному показнику.
 
@@ -97,6 +98,12 @@ def reconcile(
     (різні біржі/контракти/час зрізу дають природний розкид; живий
     замір Yahoo↔TradingEconomics — 0.3-1.4%). Пороги —
     `config.CONSENSUS_TOLERANCE_PCT`.
+
+    `abs_tolerance` — допуск в одиницях самого показника; значення в
+    межах, якщо виконано БУДЬ-ЯКИЙ із двох. Без нього відсоток
+    безглуздий біля нуля: мінімальна температура 0.4°C проти 1.1°C —
+    це "розбіжність 93%", а тижнева зміна запасів −10 проти −14 тис.
+    барелів (джерело округлює до 0.01 млн) — "розбіжність 33%".
     """
     present = [sv for sv in values if sv.value is not None]
 
@@ -113,12 +120,21 @@ def reconcile(
 
     median = _median([sv.value for sv in present])
     deviations = {sv.source: _pct_diff(sv.value, median) for sv in present}
+    abs_deviations = {sv.source: abs(sv.value - median) for sv in present}
     max_spread = max(deviations.values())
 
-    agreeing = [s for s, d in deviations.items() if d <= tolerance_pct]
-    outliers = [s for s, d in deviations.items() if d > tolerance_pct]
+    def _within(source: str) -> bool:
+        if deviations[source] <= tolerance_pct:
+            return True
+        return abs_tolerance is not None and abs_deviations[source] <= abs_tolerance
+
+    agreeing = [s for s in deviations if _within(s)]
+    outliers = [s for s in deviations if not _within(s)]
 
     if not outliers:
+        tolerance_text = f"{tolerance_pct}%"
+        if abs_tolerance is not None:
+            tolerance_text += f" або ±{abs_tolerance} в одиницях ряду"
         return ConsensusVerdict(
             metric_id=metric_id,
             status=AGREE,
@@ -126,7 +142,7 @@ def reconcile(
             max_spread_pct=max_spread,
             detail=(
                 f"{len(present)} джерел узгоджені в межах "
-                f"{tolerance_pct}% (максимальний розкид {max_spread:.2f}%)"
+                f"{tolerance_text} (максимальний розкид {max_spread:.2f}%)"
             ),
         )
 

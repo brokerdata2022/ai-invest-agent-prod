@@ -18,7 +18,12 @@ LLM (`fundamental_llm.py`).
 - `"news"` / `"synthesis"` — новинний фон і готовий звʼязок
   ціна↔новини по цьому активу;
 - `"yoy:source:metric_id"` — РІЧНА зміна у відсотках, порахована
-  кодом.
+  кодом;
+- `"asset:<asset_id>"` — ціна ІНШОГО активу watchlist через його
+  поточне джерело (чек-листи від ШІ, `fundamental/checklist.py`).
+
+Для факторних рядів (`config.FACTOR_SERIES`) до чинника додається
+позначка довіри — звірено / одне джерело / розійшлись / застаріло.
 
 ## Чому існує `yoy:` (живий дефект, 2026-10-04)
 
@@ -38,9 +43,13 @@ LLM (`fundamental_llm.py`).
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import config
+from common.freshness import is_stale
+
+if TYPE_CHECKING:
+    from fundamental.checklist import Checklist
 
 
 @dataclass
@@ -52,6 +61,9 @@ class Factor:
     points: list[dict] = field(default_factory=list)   # [{observed_at, value}]
     texts: list[str] = field(default_factory=list)      # для news/synthesis
     missing_reason: Optional[str] = None                # чому даних немає
+    # Позначка довіри для факторних рядів (config.FACTOR_SERIES):
+    # звірено / одне джерело / розійшлись / застаріло.
+    note: Optional[str] = None
 
 
 @dataclass
@@ -176,22 +188,105 @@ def _fetch_synthesis(conn, asset_id: str) -> list[str]:
     return [f"[напрямок {row[1]}, впевненість {float(row[2]):.2f}] {row[0]}"]
 
 
+def _fetch_asset_price_source(conn, asset_id: str) -> Optional[tuple[str, str]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT source, metric_id FROM watchlist_assets WHERE asset_id = %s AND enabled",
+            (asset_id,),
+        )
+        row = cur.fetchone()
+    return (row[0], row[1]) if row else None
+
+
+def _fetch_latest_verdict(conn, metric_id: str) -> Optional[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT observed_at, status, max_spread_pct, source_values, detail
+            FROM factor_verdicts
+            WHERE metric_id = %s
+            ORDER BY observed_at DESC
+            LIMIT 1
+            """,
+            (metric_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return dict(zip(("observed_at", "status", "max_spread_pct", "source_values", "detail"), row))
+
+
+def trust_note(metric_id: str, verdict: Optional[dict], last_observed_at: Optional[date],
+               today: Optional[date] = None) -> str:
+    """Позначка довіри до факторного ряду для промпта: чи підтвердило
+    значення друге джерело і чи воно свіже.
+
+    Навіщо: без неї LLM однаково довіряв би звіреним запасам EIA і
+    потокам ETF з одного скрапінгу, а застиглий ряд читав би як
+    "нічого не змінюється" — рівно той клас тихих дефектів, що
+    `docs/decisions.md` 2026-10-13 описує як головний у проєкті."""
+    spec = config.FACTOR_SERIES[metric_id]
+    parts: list[str] = []
+
+    threshold = spec["stale_business_days"]
+    if last_observed_at is not None and threshold is not None and is_stale(
+        last_observed_at, today=today, threshold_business_days=threshold
+    ):
+        parts.append(f"ЗАСТАРІЛО: остання точка {last_observed_at}")
+
+    if not spec["secondary"]:
+        parts.append(f"одне джерело ({spec['primary']}), незалежної звірки немає")
+    elif verdict is None:
+        parts.append("звірки ще не було")
+    else:
+        others = ", ".join(item["source"] for item in spec["secondary"])
+        status = verdict["status"]
+        if status == "agree":
+            spread = verdict.get("max_spread_pct")
+            spread_text = f", розкид {Decimal(spread):.2f}%" if spread is not None else ""
+            parts.append(f"звірено з {others} на {verdict['observed_at']}: згода{spread_text}")
+        elif status in ("outlier", "disagree"):
+            values = verdict.get("source_values") or {}
+            rendered = ", ".join(f"{s}={v}" for s, v in values.items())
+            parts.append(f"ДЖЕРЕЛА РОЗІЙШЛИСЬ на {verdict['observed_at']}: {rendered}")
+        else:
+            parts.append(f"звірка не вдалась: {verdict.get('detail') or status}")
+
+    return "; ".join(parts)
+
+
+def _factor_series_metric(key: str) -> Optional[str]:
+    """metric_id факторного ряду, якщо ключ — його ОСНОВНЕ джерело."""
+    if key.count(":") != 1:
+        return None
+    source, metric_id = key.split(":", 1)
+    spec = config.FACTOR_SERIES.get(metric_id)
+    if spec is None or spec["primary"] != source:
+        return None
+    return metric_id
+
+
 def collect_asset_factors(
-    conn, asset_id: str, label: str, price_source: str, price_metric_id: str
+    conn, asset_id: str, label: str, price_source: str, price_metric_id: str,
+    checklist: Optional["Checklist"] = None,
 ) -> AssetFactors:
     """Усі чинники одного активу за його чек-листом.
+
+    `checklist` — уже вирішений чек-лист (`fundamental/checklist.py`:
+    ручний із config, складений ШІ або універсальний). Без нього —
+    ручний із `config.ASSET_FACTORS` або універсальний набір.
 
     Чинник без даних НЕ відкидається, а лишається з `missing_reason` —
     щоб у промпт пішло явне "цього чинника немає", а не тиша: LLM
     інакше не знає, чи чинник неважливий, чи просто не дістався
     (той самий принцип честних прогалин, що `ASSET_FACTOR_GAPS`)."""
-    specs = config.ASSET_FACTORS.get(asset_id)
-    using_default = specs is None
-    if using_default:
-        # Актив, доданий через `/watchlist_add` без свого чек-листа
-        # (живий кейс `bnb`, 2026-10-04) — беремо універсальний набір,
-        # а не випадаємо з аналізу назовсім: watchlist редагується
-        # через Telegram БЕЗ зміни коду, і аналіз має це витримувати.
+    if checklist is not None:
+        specs = checklist.specs
+        using_default = checklist.origin == "default"
+    else:
+        specs = config.ASSET_FACTORS.get(asset_id)
+        using_default = specs is None
+    if specs is None:
         specs = config.DEFAULT_ASSET_FACTORS
 
     factors: list[Factor] = []
@@ -215,6 +310,18 @@ def collect_asset_factors(
             factor.texts = _fetch_synthesis(conn, asset_id)
             if not factor.texts:
                 factor.missing_reason = "синтезу ціна/новини ще немає"
+        elif key.startswith("asset:"):
+            # Ціна іншого активу watchlist — через його ПОТОЧНЕ джерело
+            # (воно автоматично перемикається), не через прибите в
+            # чек-листі (fundamental/checklist.py).
+            other_id = key[len("asset:"):]
+            other = _fetch_asset_price_source(conn, other_id)
+            if other is None:
+                factor.missing_reason = f"активу {other_id} немає в списку обраних"
+            else:
+                factor.points = _fetch_series(conn, other[0], other[1], config.FACTOR_HISTORY_POINTS)
+                if not factor.points:
+                    factor.missing_reason = f"ціна {other_id} не збирається ({other[0]}/{other[1]})"
         elif key.startswith("yoy:"):
             source, metric_id = key[4:].split(":", 1)
             factor.points = _fetch_yoy(conn, source, metric_id)
@@ -229,12 +336,22 @@ def collect_asset_factors(
             )
             if not factor.points:
                 factor.missing_reason = f"немає даних у {source}/{metric_id}"
+            series_metric = _factor_series_metric(key)
+            if series_metric and factor.points:
+                factor.note = trust_note(
+                    series_metric,
+                    _fetch_latest_verdict(conn, series_metric),
+                    date.fromisoformat(factor.points[-1]["observed_at"]),
+                )
         else:
             factor.missing_reason = f"невідомий тип чинника {key!r}"
 
         factors.append(factor)
 
-    gaps = config.ASSET_FACTOR_GAPS.get(asset_id, ())
+    if checklist is not None:
+        gaps = tuple(checklist.gaps)
+    else:
+        gaps = config.ASSET_FACTOR_GAPS.get(asset_id, ())
     if using_default:
         # Честно попереджаємо в тому самому блоці, що й решта прогалин:
         # загальний аналіз не має подаватись як повний.

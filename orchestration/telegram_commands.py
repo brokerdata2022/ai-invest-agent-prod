@@ -437,6 +437,23 @@ def launch_job(job_name: str) -> None:
     )
 
 
+def launch_checklist(asset_id: str) -> None:
+    """Неблокуючий запуск складання чек-листа чинників для щойно
+    доданого активу (2026-10-20): користувач одразу отримує окреме
+    повідомлення, ЗА ЧИМ агент тепер аналізуватиме актив, — а не
+    дізнається про це з аналізу наступного дня. `Popen`, як
+    `launch_question`: виклик ШІ триває секунди, поллер не чекає."""
+    subprocess.Popen(
+        [
+            sys.executable,
+            str(REPO_ROOT / "analysis" / "fundamental" / "build_checklist.py"),
+            "--asset", asset_id,
+            "--notify",
+        ],
+        cwd=REPO_ROOT,
+    )
+
+
 def launch_question(question: str) -> None:
     """Неблокуючий запуск відповіді на питання (2026-10-15, рішення
     користувача "пряме спілкування для будь чого з телеграм і ШІ").
@@ -514,8 +531,14 @@ def process_update(
         rows = fetch_watchlist_health(conn)
         send_telegram_message(token, configured_chat_id, format_watchlist_list(rows), parse_mode="HTML")
     elif command == "watchlist_add":
-        reply = handle_watchlist_add(conn, parse_command_args(text), twelvedata_api_key)
+        ticker_arg = parse_command_args(text)
+        asset_id = normalize_ticker_to_asset_id(ticker_arg) if ticker_arg.strip() else None
+        before = find_asset(conn, asset_id) if asset_id else None
+        reply = handle_watchlist_add(conn, ticker_arg, twelvedata_api_key)
         send_telegram_message(token, configured_chat_id, reply, parse_mode="HTML")
+        after = find_asset(conn, asset_id) if asset_id else None
+        if after and after["enabled"] and not (before and before["enabled"]):
+            launch_checklist(asset_id)
     elif command == "watchlist_remove":
         reply = handle_watchlist_remove(conn, parse_command_args(text))
         send_telegram_message(token, configured_chat_id, reply, parse_mode="HTML")

@@ -873,6 +873,12 @@ JOBS = {
     "quotes_crosscheck": {
         "subprocess": _py(str(REPO_ROOT / "monitoring" / "crosscheck_quotes.py"), "--notify"),
     },
+    "factor_series": {
+        "subprocess": _py(str(REPO_ROOT / "data-ingestion" / "run_collect_factors.py")),
+    },
+    "factor_crosscheck": {
+        "subprocess": _py(str(REPO_ROOT / "monitoring" / "crosscheck_factors.py"), "--notify"),
+    },
     "scheduler_heartbeat": {
         "callable": _scheduler_heartbeat,
     },

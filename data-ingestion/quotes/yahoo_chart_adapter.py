@@ -93,6 +93,9 @@ SYMBOLS: dict[str, str] = {
     "btc": "BTC-USD",
     "eth": "ETH-USD",
     "sol": "SOL-USD",
+    # НЕ watchlist-актив, а факторний ряд (config.FACTOR_SERIES,
+    # 2026-10-20): мідь як проксі промислового попиту на срібло.
+    "copper": "HG=F",
 }
 
 

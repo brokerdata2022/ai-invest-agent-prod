@@ -126,3 +126,38 @@ def test_zero_values_do_not_divide_by_zero(values):
     verdict = reconcile("x", values, TOL)
     assert verdict.status == AGREE
     assert verdict.consensus == Decimal("0")
+
+
+# --- абсолютний допуск (2026-10-20, факторні ряди) ---------------------
+
+def test_abs_tolerance_rescues_near_zero_values():
+    """Мінімальна температура біля нуля: 0.4 проти 1.1°C — це 47%
+    "розбіжності" від медіани, але 0.35°C по суті. Без абсолютного
+    допуску прогноз заморозків щодня читався б як розбіжність джерел."""
+    values = [SourceValue("open_meteo", Decimal("0.4")), SourceValue("met_norway", Decimal("1.1"))]
+
+    assert reconcile("brazil_coffee_min_temp_7d", values, Decimal("0")).status == DISAGREE
+    verdict = reconcile("brazil_coffee_min_temp_7d", values, Decimal("0"), Decimal("2.5"))
+    assert verdict.status == AGREE
+
+
+def test_abs_tolerance_does_not_hide_a_real_gap():
+    """Живий замір 2026-10-20 — EIA −8557 проти TradingEconomics −8560
+    тис. бар. (округлення до 0.01 млн) — у межах; а різниця на мільйон
+    барелів — уже ні."""
+    ok = reconcile("us_crude_stocks", [
+        SourceValue("eia", Decimal("-8557")), SourceValue("tradingeconomics", Decimal("-8560")),
+    ], Decimal("1"), Decimal("15"))
+    assert ok.status == AGREE
+
+    bad = reconcile("us_crude_stocks", [
+        SourceValue("eia", Decimal("-8557")), SourceValue("tradingeconomics", Decimal("-7560")),
+    ], Decimal("1"), Decimal("15"))
+    assert bad.status == DISAGREE
+
+
+def test_without_abs_tolerance_behaviour_is_unchanged():
+    """Наявні виклики (watchlist, макро, котирування) абсолютного допуску
+    не передають — для них нічого не змінилось."""
+    verdict = reconcile("x", [SourceValue("a", Decimal("100")), SourceValue("b", Decimal("110"))], TOL)
+    assert verdict.status == DISAGREE

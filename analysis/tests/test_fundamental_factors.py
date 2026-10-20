@@ -152,11 +152,19 @@ def test_inflation_factors_use_yoy_not_index_level():
         )
 
 
-def test_gaps_declared_for_assets_with_known_blind_spots():
-    for asset_id in ("wti_crude", "natgas", "coffee", "xauusd"):
-        assert config.ASSET_FACTOR_GAPS.get(asset_id), (
-            f"{asset_id}: прогалини в даних не названі — LLM домислюватиме"
-        )
+def test_gaps_declared_for_every_asset_with_a_checklist():
+    """Кожен ручний чек-лист має запис про прогалини — навіть порожній.
+    Порожній означає "перевірено: специфічних прогалин немає", а
+    ВІДСУТНІЙ — "ніхто не дивився" (2026-10-20: прогалини газу й кави
+    закрито джерелами, і саме тому вони тепер порожні, а не зникли)."""
+    assert set(config.ASSET_FACTORS) <= set(config.ASSET_FACTOR_GAPS)
+
+
+def test_known_remaining_blind_spots_are_still_named():
+    """Те, для чого автоматизованого джерела справді немає, мусить
+    лишатись названим — інакше LLM домислюватиме."""
+    for asset_id in ("wti_crude", "xauusd", "xagusd", "usdjpy"):
+        assert config.ASSET_FACTOR_GAPS.get(asset_id), asset_id
 
 
 # --- промпт ----------------------------------------------------------

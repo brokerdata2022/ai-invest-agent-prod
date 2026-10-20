@@ -601,6 +601,7 @@ def test_process_update_watchlist_add_dispatches_with_parsed_args(monkeypatch):
         telegram_commands, "handle_watchlist_add",
         lambda conn, ticker_arg, twelvedata_api_key: captured.update(ticker_arg=ticker_arg, key=twelvedata_api_key) or "ok",
     )
+    monkeypatch.setattr(telegram_commands, "find_asset", lambda conn, asset_id: None)
     sent = []
     monkeypatch.setattr(telegram_commands, "send_telegram_message", lambda token, chat_id, text, **k: sent.append(text))
 
@@ -611,6 +612,41 @@ def test_process_update_watchlist_add_dispatches_with_parsed_args(monkeypatch):
 
     assert captured == {"ticker_arg": "GBP/USD", "key": "key123"}
     assert sent == ["ok"]
+
+
+def _watchlist_add_with_states(monkeypatch, before, after):
+    """`find_asset` до й після додавання → чи запустився чек-лист."""
+    states = iter([before, after])
+    monkeypatch.setattr(telegram_commands, "find_asset", lambda conn, asset_id: next(states))
+    monkeypatch.setattr(telegram_commands, "handle_watchlist_add", lambda conn, ticker_arg, twelvedata_api_key: "ok")
+    monkeypatch.setattr(telegram_commands, "send_telegram_message", lambda *a, **k: None)
+    launched = []
+    monkeypatch.setattr(telegram_commands, "launch_checklist", launched.append)
+    process_update(_message("/watchlist_add BNB"), configured_chat_id="123456", token="T", conn=object())
+    return launched
+
+
+def test_watchlist_add_launches_checklist_for_new_asset(monkeypatch):
+    """Щойно доданий актив одразу отримує свій чек-лист окремим
+    повідомленням (2026-10-20) — а не лише в аналізі наступного дня."""
+    launched = _watchlist_add_with_states(monkeypatch, None, {"asset_id": "bnb", "enabled": True})
+    assert launched == ["bnb"]
+
+
+def test_watchlist_add_launches_checklist_for_reenabled_asset(monkeypatch):
+    launched = _watchlist_add_with_states(
+        monkeypatch, {"asset_id": "bnb", "enabled": False}, {"asset_id": "bnb", "enabled": True},
+    )
+    assert launched == ["bnb"]
+
+
+def test_watchlist_add_does_not_relaunch_for_existing_or_failed(monkeypatch):
+    """Актив уже був увімкнений — нічого нового; не додався — чек-листу
+    нема для чого складатись (кожен запуск — платний виклик ШІ)."""
+    assert _watchlist_add_with_states(
+        monkeypatch, {"asset_id": "bnb", "enabled": True}, {"asset_id": "bnb", "enabled": True},
+    ) == []
+    assert _watchlist_add_with_states(monkeypatch, None, None) == []
 
 
 def test_process_update_watchlist_remove_dispatches_with_parsed_args(monkeypatch):

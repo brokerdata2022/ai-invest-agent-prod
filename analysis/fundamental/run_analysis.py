@@ -19,6 +19,7 @@ fundamental_analysis".
     python run_analysis.py
     python run_analysis.py --top 3
     python run_analysis.py --ticker HPE     # один тикер, для перевірки
+    python run_analysis.py --asset xauusd --dry-run   # промпт без виклику ШІ
 """
 
 import argparse
@@ -54,6 +55,7 @@ from fundamental._db import (  # noqa: E402
     fetch_watchlist_assets,
     save_fundamental_analysis,
 )
+from fundamental.checklist import ORIGIN_DEFAULT, resolve_checklist  # noqa: E402
 from fundamental.factors import collect_asset_factors  # noqa: E402
 from fundamental.fundamental_llm import (  # noqa: E402
     ASSET_SYSTEM_PROMPT,
@@ -145,24 +147,30 @@ def analyze_stock(conn, stock: dict) -> bool:
     return True
 
 
-def analyze_watchlist_asset(conn, asset: dict) -> bool:
+def analyze_watchlist_asset(conn, asset: dict, watchlist: list[dict], dry_run: bool = False) -> bool:
     """Розгорнутий аналіз активу СПИСКУ ОБРАНИХ за ЙОГО чинниками
     (рішення користувача 2026-10-04). На відміну від акцій, вхід — не
-    звітність, а власний для кожного активу набір чинників
-    (`config.py:ASSET_FACTORS`): золото — реальні ставки й долар,
-    USD/JPY — різниця ставок ФРС/БОЯ, нафта — економічна активність."""
+    звітність, а власний для кожного активу набір чинників: ручний із
+    `config.py:ASSET_FACTORS` або складений ШІ для активу, доданого
+    через Telegram (`fundamental/checklist.py`, 2026-10-20).
+
+    `dry_run` — друкує промпт без жодного виклику ШІ (і чек-лист не
+    складається наново — береться збережений)."""
     asset_id = asset["asset_id"]
+    checklist = resolve_checklist(conn, asset, watchlist, allow_generate=not dry_run)
     asset_factors = collect_asset_factors(
         conn,
         asset_id=asset_id,
         label=asset.get("label") or asset_id,
         price_source=asset["source"],
         price_metric_id=asset["metric_id"],
+        checklist=checklist,
     )
 
-    if asset_factors.using_default_factors:
-        logger.info(
-            "%s: свого чек-листа немає — універсальний набір "
+    logger.info("%s: чек-лист — %s (%d чинників)", asset_id, checklist.origin, len(checklist.specs))
+    if checklist.origin == ORIGIN_DEFAULT:
+        logger.warning(
+            "%s: власного чек-листа немає — універсальний набір "
             "(config.py:DEFAULT_ASSET_FACTORS)", asset_id,
         )
 
@@ -174,6 +182,10 @@ def analyze_watchlist_asset(conn, asset: dict) -> bool:
         return False
 
     prompt = build_asset_prompt(asset_factors)
+    if dry_run:
+        print(f"\n===== {asset_id} ({checklist.origin}) =====\n{prompt}\n")
+        return True
+
     llm = call_llm(prompt, ASSET_SYSTEM_PROMPT, purpose="fundamental_analysis_asset")
     raw_content = llm.text
 
@@ -202,6 +214,8 @@ def analyze_watchlist_asset(conn, asset: dict) -> bool:
                 for f in asset_factors.unavailable
             ],
             "gaps": list(asset_factors.gaps),
+            "checklist_origin": checklist.origin,
+            "trust_notes": {f.label: f.note for f in asset_factors.available if f.note},
         },
         llm_call_id=llm_call_id,
     )
@@ -232,9 +246,15 @@ def main() -> None:
         "--only", choices=("watchlist", "stocks"), default=None,
         help="обмежити прогін однією половиною (за замовчуванням — обидві)",
     )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="активи watchlist: надрукувати промпт аналізу без жодного виклику ШІ "
+             "(чек-лист береться збережений, наново не складається)",
+    )
     args = parser.parse_args()
 
-    require_api_key("fundamental_analysis")
+    if not args.dry_run:
+        require_api_key("fundamental_analysis")
 
     conn = get_connection()
     try:
@@ -242,21 +262,19 @@ def main() -> None:
 
         # --- активи СПИСКУ ОБРАНИХ (кожен за своїми чинниками) ---
         if args.only != "stocks":
+            watchlist = fetch_watchlist_assets(conn)
             if args.asset:
-                assets = [
-                    a for a in fetch_watchlist_assets(conn)
-                    if a["asset_id"] == args.asset
-                ]
+                assets = [a for a in watchlist if a["asset_id"] == args.asset]
                 if not assets:
                     logger.error("%s: немає в watchlist", args.asset)
             else:
-                assets = fetch_watchlist_assets(conn)
+                assets = watchlist
 
             logger.info("Аналізуємо %d активів зі списку обраних", len(assets))
             for asset in assets:
                 total += 1
                 try:
-                    if analyze_watchlist_asset(conn, asset):
+                    if analyze_watchlist_asset(conn, asset, watchlist, dry_run=args.dry_run):
                         analyzed += 1
                 except SynthesisResponseError:
                     logger.exception("%s: некоректна відповідь LLM", asset["asset_id"])
@@ -271,7 +289,7 @@ def main() -> None:
                     conn.rollback()
 
         # --- акції зі скринінгу (вхід — звітність, не чинники) ---
-        if args.only != "watchlist" and not args.asset:
+        if args.only != "watchlist" and not args.asset and not args.dry_run:
             if args.ticker:
                 stocks = [{"ticker": args.ticker.upper(), "company_name": None}]
             else:
