@@ -14,6 +14,7 @@
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -49,13 +50,18 @@ class CatalystHit:
     ні перекласти metric_id, ні згрупувати той самий реліз).
     `text` лишається технічним аудит-слідом."""
 
-    kind: str          # release_upcoming | release_done | news | synthesis | forecast
+    kind: str          # release_upcoming | release_done | news | synthesis | forecast | earnings
+                       # | price_anomaly | crypto_setup | discovery
     weight: Decimal
     direction: str = DIRECTION_NEUTRAL
     text: str = ""
     metric_id: str = ""
     detail: str = ""
     when: str = ""
+    # Коли подія СТАЛАСЬ чи СТАНЕТЬСЯ (UTC). Потрібна фільтру "каталізатор
+    # сьогодні" (2026-10-22, пункт 4 плану сесії): той самий тип хіта
+    # тиждень тому і сьогодні — різні речі для трейдера.
+    at: Optional[datetime] = None
 
     def as_reason(self) -> dict:
         """Структурована форма для `trading_list.reasons` (JSONB)."""
@@ -394,3 +400,151 @@ def select_final(
     final = [eligible[i] for i in chosen]
     final.sort(key=lambda item: item[1].total, reverse=True)
     return final
+
+
+
+# ============================================================
+# "ЧИМ ТОРГУВАТИ СЬОГОДНІ" (2026-10-22, пункт 4 плану сесії)
+# ============================================================
+# Рішення користувача: список для торгів — це ВІДФІЛЬТРОВАНИЙ список з
+# усіх наших списків (watchlist, скринінг акцій, крипто-сетапи,
+# новачки), і в нього потрапляє лише те, чим реально торгувати
+# СЬОГОДНІ: напрямок, каталізатор сьогодні, рівні, коротке "чому".
+# Без каталізатора сьогодні чи з суперечливими сигналами — не
+# потрапляє. Живий фідбек: список був майже однаковим щодня, а пункти
+# на кшталт "price_anomaly вгору, тренд вниз" трейдеру нічого не дають.
+#
+# "Власний" каталізатор = подія саме цього активу. Широке макро для
+# акцій (спільна "підлога", `stock_floor`) сюди НЕ входить: воно
+# однакове для 215 тикерів і нічого не каже про конкретний.
+
+REJECT_NO_CATALYST = "немає каталізатора сьогодні"
+REJECT_CONFLICTING = "сигнали суперечать"
+REJECT_NO_DIRECTION = "немає напрямку"
+REJECT_LOW_SCORE = "скор нижче порогу"
+
+# Макрореліз — власна подія лише для не-акцій: для валюти, золота,
+# крипти реліз і Є різнителем (`categories.py`), для акції — ні.
+_MACRO_KINDS = ("release_upcoming", "release_done")
+
+
+def is_today_catalyst(hit: CatalystHit, asset_class: Optional[str], now: datetime) -> bool:
+    """Чи цей хіт — каталізатор САМЕ СЬОГОДНІ для цього класу активу.
+
+    - новина/синтез/новачок/крипто-сетап — за останні
+      `TRADING_TODAY_HOURS`;
+    - звіт компанії — від учора (реакція на звіт після закриття) до
+      завтра включно (`TRADING_EARNINGS_WINDOW_DAYS`);
+    - аномальний рух — завжди (рахується з останніх днів);
+    - запланований реліз — у найближчі `TRADING_TODAY_HOURS`, вийшлий —
+      за останні, і лише для не-акцій;
+    - наш прогноз показника — ніколи: це не подія.
+    Хіт без часу (`at` None) — не сьогоднішній: невідомо, коли він."""
+    window = timedelta(hours=config.TRADING_TODAY_HOURS)
+    kind = hit.kind
+    if kind == "price_anomaly":
+        return True
+    if kind == "forecast":
+        return False
+    if kind in _MACRO_KINDS and asset_class in ("stock", None):
+        return False
+    if hit.at is None:
+        return False
+    at = hit.at if hit.at.tzinfo else hit.at.replace(tzinfo=timezone.utc)
+    if kind == "earnings":
+        days = (at.date() - now.date()).days
+        return -1 <= days <= config.TRADING_EARNINGS_WINDOW_DAYS
+    if kind == "release_upcoming":
+        return now <= at <= now + window
+    return now - window <= at <= now
+
+
+def trend_consistent(values: list[Decimal]) -> Optional[bool]:
+    """Чи коротке й довге вікна тренду вказують в ОДИН бік. None —
+    історії на довге вікно немає (судити нема з чого)."""
+    short = pct_change(values, config.TREND_SHORT_DAYS)
+    long = pct_change(values, config.TREND_LONG_DAYS)
+    if short is None or long is None:
+        return None
+    return (short > _ZERO) == (long > _ZERO)
+
+
+def trading_direction(today_hits: list[CatalystHit], trend_direction: str,
+                      extra_direction: Optional[str] = None,
+                      trend_is_consistent: Optional[bool] = None) -> str:
+    """Напрямок для торгів — з ВЛАСНИХ сьогоднішніх подій і тренду.
+    Старі хіти (новина тижневої давності) голосу не мають: інакше вони
+    робили б "суперечливо" актив, у якого сьогодні все однозначно.
+
+    Якщо ВСІ сьогоднішні події без напрямку (реліз попереду, дата
+    звіту), напрямок дає лише тренд — і тоді він мусить бути
+    УЗГОДЖЕНИМ (коротке й довге вікна в один бік). Живий прогін
+    2026-10-22: SOL/ETH/срібло проходили як "вниз" з одним лише
+    завтрашнім CPI Японії й трендом "−6% коротке / +43% довге" —
+    розбіжний тренд сам по собі суперечливий сигнал, не напрямок."""
+    directional = [h for h in today_hits if h.direction in (DIRECTION_UP, DIRECTION_DOWN)]
+    if not directional and extra_direction is None and trend_is_consistent is False:
+        return DIRECTION_UNCLEAR
+    votes = [h.direction for h in today_hits] + [trend_direction]
+    if extra_direction:
+        votes.append(extra_direction)
+    return resolve_direction(votes)
+
+
+def rejection_reason(today_hits: list[CatalystHit], direction: str, total: Decimal) -> Optional[str]:
+    """None — актив проходить у список для торгів; інакше — чому ні.
+    Порядок перевірок — від найголовнішого: без події сьогодні напрямок
+    і скор уже не мають значення."""
+    if not today_hits:
+        return REJECT_NO_CATALYST
+    if direction == DIRECTION_CONFLICTING:
+        return REJECT_CONFLICTING
+    if direction not in (DIRECTION_UP, DIRECTION_DOWN):
+        return REJECT_NO_DIRECTION
+    if total < config.MIN_SCORE:
+        return REJECT_LOW_SCORE
+    return None
+
+
+def price_levels(closes: list[Decimal], last_price: Optional[Decimal] = None) -> Optional[dict]:
+    """Рівні з денних закриттів (хронологічний порядок): остання ціна,
+    максимум і мінімум за `TRADING_LEVEL_DAYS`, звичайний денний розмах
+    (середній |%| зміни за день) і відстань до максимуму/мінімуму.
+
+    ОПИС стану, не вказівка входу (analysis/CLAUDE.md: жодних
+    "купити/продати"): трейдер бачить, де ціна відносно недавнього
+    діапазону і який рух для активу звичайний. Немає закриттів, але є
+    остання ціна (крипто-ф'ючерси) — лише ціна."""
+    window = closes[-(config.TRADING_LEVEL_DAYS + 1):] if closes else []
+    if len(window) < 2:
+        if last_price is None:
+            return None
+        return {"last": str(last_price), "note": "денних закриттів немає — лише остання ціна"}
+
+    last = window[-1]
+    high, low = max(window), min(window)
+    moves = [abs(b - a) / a * Decimal(100) for a, b in zip(window, window[1:]) if a]
+    daily = sum(moves, Decimal(0)) / len(moves) if moves else None
+
+    def pct(value: Decimal) -> str:
+        return f"{(value - last) / last * Decimal(100):+.1f}" if last else "0"
+
+    return {
+        "last": str(last),
+        "high": str(high),
+        "low": str(low),
+        "days": len(window) - 1,
+        "to_high_pct": pct(high),
+        "to_low_pct": pct(low),
+        "daily_move_pct": f"{daily:.2f}" if daily is not None else None,
+    }
+
+
+def why_line(today_hits: list[CatalystHit], trend_detail: str) -> str:
+    """Коротке "чому" — найсильніша сьогоднішня подія + тренд. Текст
+    для людини складає reporting/; тут — сирий аудит-рядок."""
+    strongest = sorted(today_hits, key=lambda h: h.weight, reverse=True)[:2]
+    parts = [h.text for h in strongest if h.text]
+    if trend_detail:
+        parts.append(f"тренд: {trend_detail}")
+    return "; ".join(parts)

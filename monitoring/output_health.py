@@ -141,14 +141,18 @@ def run_check(conn, check: dict) -> dict:
     if rows < check["min_rows"]:
         problems.append(f"рядків {rows} < {check['min_rows']}")
 
+    # Поріг різноманітності — не більший за кількість рядків: 2 рядки
+    # не можуть мати 3 різні значення, і без цього короткий (законно)
+    # список торгів читався б як вироджений (2026-10-22).
+    min_distinct = min(check["min_distinct"], rows)
     for field in check["vary"]:
         distinct = measured[f"distinct_{field}"]
-        if distinct < check["min_distinct"]:
+        if distinct < min_distinct:
             # Саме це й означає "вивід вироджений": рядки є, а значення
             # в них однакові.
             problems.append(
                 f"{field}: лише {distinct} різних значень на {rows} рядків "
-                f"(очікувалось ≥{check['min_distinct']})"
+                f"(очікувалось ≥{min_distinct})"
             )
 
     for field in check["required"]:

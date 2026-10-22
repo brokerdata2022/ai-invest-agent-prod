@@ -77,7 +77,7 @@ def fetch_relevant_for_aggregation(
 def fetch_consolidated_as_clusters(
     conn,
     streams: tuple[str, ...],
-    max_age_days: int,
+    max_age_hours: int,
     min_sources: int,
     limit: int,
 ) -> list[dict]:
@@ -112,12 +112,14 @@ def fetch_consolidated_as_clusters(
                    source_raw_news_ids, asset_id, created_at
             FROM news_consolidated
             WHERE stream IN ({placeholders})
-              AND created_at >= now() - (%s || ' days')::interval
+              AND created_at >= now() - make_interval(hours => %s)
               AND source_count >= %s
             ORDER BY source_count DESC, created_at DESC
             LIMIT %s
             """,
-            (*streams, max_age_days, min_sources, limit),
+            # Години, не дні (2026-10-22): сесійний бриф бере лише те,
+            # що сталось від попередньої сесії, а не тиждень.
+            (*streams, max_age_hours, min_sources, limit),
         )
         columns = [c[0] for c in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
@@ -279,3 +281,23 @@ def save_analysis(
             ),
         )
     conn.commit()
+
+
+def fetch_session_trading_list(conn, kinds: tuple[str, ...]) -> list[dict]:
+    """Активи ОСТАННЬОГО прогону списку для торгів, що торгуються в цю
+    сесію (`config.SESSION_ASSET_CLASSES`) — для сесійного брифу
+    (2026-10-22, пункт 5 плану сесії). Порожньо — або прогін порожній,
+    або в цю сесію торгувати нічим; бриф прямо це скаже."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT asset_id, label, kind, direction, why, levels, score
+            FROM trading_list
+            WHERE run_at = (SELECT MAX(run_at) FROM trading_list_runs)
+              AND kind = ANY(%s)
+            ORDER BY score DESC
+            """,
+            (list(kinds),),
+        )
+        columns = [c[0] for c in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]

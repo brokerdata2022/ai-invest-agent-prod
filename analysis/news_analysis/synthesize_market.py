@@ -17,9 +17,15 @@ aggregate.py:top_clusters() (найбільш підтверджені істо�
 (`llm_common.py`), тут лишається лише своє: SYSTEM_PROMPT,
 build_prompt() і макро-контекст.
 
+**Сесійний бриф ДО відкриття (2026-10-22, пункт 5 плану сесії).**
+Прогін — за `config.SESSION_PREOPEN_MINUTES` до відкриття біржі; вікно
+новин — від попередньої сесії (`MARKET_SYNTHESIS_SESSION_HOURS`), а не 7
+днів, через які три сесії доби бачили одну вибірку; у промпт іде
+список активів для торгів, що торгуються в цю сесію (`trading_list`).
+
 Використання:
-    python synthesize_market.py
-    python synthesize_market.py --max-age-days 3 --top 5
+    python synthesize_market.py --session us
+    python synthesize_market.py --session us --dry-run   # промпт без ШІ
 """
 
 import argparse
@@ -43,11 +49,19 @@ from llm_common import (  # noqa: E402
     parse_synthesis_response,
     require_api_key,
 )
-from news_analysis._db import fetch_consolidated_as_clusters, save_market_synthesis  # noqa: E402
+from news_analysis._db import (  # noqa: E402
+    fetch_consolidated_as_clusters,
+    fetch_session_trading_list,
+    save_market_synthesis,
+)
 from news_analysis.aggregate import NewsCluster  # noqa: E402
 from config import (  # noqa: E402
+    MARKET_SYNTHESIS_FALLBACK_HOURS,
     MARKET_SYNTHESIS_MAX_STORIES,
     MARKET_SYNTHESIS_MIN_SOURCES,
+    MARKET_SYNTHESIS_MIN_STORIES,
+    MARKET_SYNTHESIS_SESSION_HOURS,
+    SESSION_ASSET_CLASSES,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -81,19 +95,22 @@ MACRO_CONTEXT_METRICS: dict[str, tuple[str, str]] = {
 # добу дали б три майже однакові висновки з однакових даних.
 SESSIONS = {
     "asia": (
-        "Щойно відкрилась АЗІАТСЬКА сесія (Токіо). Азійські ринки першими "
-        "реагують на те, що сталось за ніч — насамперед на закриття США й "
-        "на нічні новини. Враховуй саме цю реакцію-відповідь."
+        "За ~45 хв відкривається АЗІАТСЬКА сесія (Токіо). Азійські ринки "
+        "першими реагують на те, що сталось за ніч, — насамперед на "
+        "закриття США й нічні новини. Оціни, з чим ринок підходить до "
+        "відкриття і що може задати тон."
     ),
     "europe": (
-        "Щойно відкрилась ЄВРОПЕЙСЬКА сесія (Лондон). Європа відкривається, "
-        "вже бачачи результат азіатської сесії, і додає власний потік "
-        "європейських даних та новин ЄЦБ."
+        "За ~45 хв відкривається ЄВРОПЕЙСЬКА сесія (Лондон). Європа "
+        "відкривається, вже бачачи результат азіатської сесії, і додає "
+        "власний потік даних та новин ЄЦБ. Оціни, з чим ринок підходить "
+        "до відкриття."
     ),
     "us": (
-        "Щойно відкрилась АМЕРИКАНСЬКА сесія (Нью-Йорк) — найбільший обсяг "
-        "торгів доби. США відкриваються, знаючи і Азію, і Європу; саме тут "
-        "найчастіше формується домінантний напрямок дня."
+        "За ~45 хв відкривається АМЕРИКАНСЬКА сесія (Нью-Йорк) — найбільший "
+        "обсяг торгів доби. США відкриваються, знаючи і Азію, і Європу; "
+        "саме тут найчастіше формується домінантний напрямок дня. Оціни, з "
+        "чим ринок підходить до відкриття."
     ),
 }
 
@@ -165,7 +182,8 @@ def _cluster_from_consolidated(row: dict) -> NewsCluster:
 
 
 def build_prompt(
-    clusters: list[NewsCluster], macro: dict, session: str = DEFAULT_SESSION
+    clusters: list[NewsCluster], macro: dict, session: str = DEFAULT_SESSION,
+    trading: list[dict] | None = None,
 ) -> str:
     lines = []
     session_context = SESSIONS.get(session)
@@ -191,17 +209,35 @@ def build_prompt(
         lines.append(f"- [{c.source_count} джерел, напрямок {c.dominant_direction}] {c.representative_title}")
         if c.summaries:
             lines.append(f"  → {c.summaries[0]}")
+
+    if trading is not None:
+        lines.append("")
+        if trading:
+            lines.append(
+                "Активи, які наш детермінований фільтр відібрав для торгів у цю "
+                "сесію (власна подія сьогодні + однозначний напрямок):"
+            )
+            for item in trading:
+                lines.append(f"- {item.get('label') or item['asset_id']} ({item['kind']}), "
+                             f"напрямок {item['direction']}: {item.get('why') or ''}")
+            lines.append(
+                "У summary коротко скажи, чи загальний стан ринку ПІДТРИМУЄ ці "
+                "напрямки чи суперечить їм."
+            )
+        else:
+            lines.append("Активів для торгів у цю сесію наш фільтр не відібрав.")
     return "\n".join(lines)
 
 
 def synthesize_market(
     clusters: list[NewsCluster], macro: dict,
     session: str = DEFAULT_SESSION,
+    trading: list[dict] | None = None,
 ):
     """Той самий контракт, що synthesize.synthesize_asset(): повертає
     (результат, промпт, відповідь_LLM) для обов'язкового логування
     (rule 5)."""
-    prompt = build_prompt(clusters, macro, session=session)
+    prompt = build_prompt(clusters, macro, session=session, trading=trading)
     llm = call_llm(prompt, SYSTEM_PROMPT, purpose="market_context_synthesis")
     result = parse_synthesis_response(llm.text)
     return result, prompt, llm
@@ -218,7 +254,12 @@ def main() -> None:
              "прогін зберігається як 'daily' (сумісність зі старим "
              "одноразовим розкладом)",
     )
-    parser.add_argument("--max-age-days", type=int, default=7)
+    parser.add_argument(
+        "--max-age-hours", type=int, default=None,
+        help="вікно історій (дефолт — config.MARKET_SYNTHESIS_SESSION_HOURS, "
+             "з розширенням до FALLBACK, якщо історій замало)",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="надрукувати промпт без виклику ШІ")
     parser.add_argument(
         "--top", type=int, default=None,
         help="СТЕЛЯ кількості історій (дефолт — config.MARKET_SYNTHESIS_MAX_STORIES); "
@@ -233,7 +274,8 @@ def main() -> None:
 
     session = args.session or DEFAULT_SESSION
 
-    require_api_key("market_context_synthesis")
+    if not args.dry_run:
+        require_api_key("market_context_synthesis")
 
     conn = get_connection()
     try:
@@ -242,13 +284,21 @@ def main() -> None:
         # fetch_consolidated_as_clusters` і config розділ 14).
         min_sources = args.min_sources or MARKET_SYNTHESIS_MIN_SOURCES
         cap = args.top or MARKET_SYNTHESIS_MAX_STORIES
-        rows = fetch_consolidated_as_clusters(
-            conn, tuple(STREAMS), args.max_age_days, min_sources, cap,
-        )
+        hours = args.max_age_hours or MARKET_SYNTHESIS_SESSION_HOURS
+        rows = fetch_consolidated_as_clusters(conn, tuple(STREAMS), hours, min_sources, cap)
+        if len(rows) < MARKET_SYNTHESIS_MIN_STORIES and not args.max_age_hours:
+            # Тихий проміжок між сесіями — розширюємо вікно, але ЯВНО:
+            # інакше синтез мовчки писав би висновок із 1-2 історій.
+            logger.info(
+                "За %d год лише %d підтверджених історій — розширюю вікно до %d год",
+                hours, len(rows), MARKET_SYNTHESIS_FALLBACK_HOURS,
+            )
+            hours = MARKET_SYNTHESIS_FALLBACK_HOURS
+            rows = fetch_consolidated_as_clusters(conn, tuple(STREAMS), hours, min_sources, cap)
         top = [_cluster_from_consolidated(row) for row in rows]
         logger.info(
-            "Підтверджених історій (>=%d джерел) за %d днів: %d (стеля %d)",
-            min_sources, args.max_age_days, len(top), cap,
+            "Підтверджених історій (>=%d джерел) за %d год: %d (стеля %d)",
+            min_sources, hours, len(top), cap,
         )
 
         if not top:
@@ -261,10 +311,21 @@ def main() -> None:
 
         macro = fetch_macro_context(conn)
         logger.info("Макро-контекст: %d показників", len(macro))
+        trading = (
+            fetch_session_trading_list(conn, SESSION_ASSET_CLASSES[session])
+            if session in SESSION_ASSET_CLASSES else None
+        )
+        if trading is not None:
+            logger.info("Активів для торгів у сесію %s: %d", session, len(trading))
+
+        if args.dry_run:
+            print(build_prompt(top, macro, session=session, trading=trading))
+            logger.info("--dry-run: ШІ не викликався, у БД не записано")
+            return
 
         try:
             result, prompt, llm = synthesize_market(
-                top, macro, session=session
+                top, macro, session=session, trading=trading,
             )
         except SynthesisResponseError:
             logger.exception("Некоректна відповідь LLM — синтез пропущено")
@@ -284,7 +345,7 @@ def main() -> None:
             conn,
             clusters=top,
             macro=macro,
-            window_days=args.max_age_days,
+            window_days=max(1, -(-hours // 24)),
             result=result,
             llm_call_id=llm_call_id,
             session=session,

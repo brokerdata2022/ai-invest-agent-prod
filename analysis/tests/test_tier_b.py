@@ -147,3 +147,25 @@ def test_fails_when_liabilities_or_assets_missing():
         liabilities=None, assets=Decimal("1000"),
     )
     assert ok is False
+
+
+# --- зобовʼязання без тегу Liabilities (2026-10-22) ---
+
+from datetime import date as _date  # noqa: E402
+from decimal import Decimal as _D  # noqa: E402
+
+from screening.tier_b import derive_liabilities  # noqa: E402
+
+
+def test_derive_liabilities_prefers_reported_tag():
+    assert derive_liabilities([(_date(2026, 6, 30), _D("80"))], [(_date(2026, 6, 30), _D("100"))],
+                              [(_date(2026, 6, 30), _D("30"))]) == _D("80")
+
+
+def test_derive_liabilities_from_balance_minus_equity_same_date():
+    """KO, AEE: тегу Liabilities у SEC немає, баланс і капітал є."""
+    assert derive_liabilities([], [(_date(2026, 4, 3), _D("100"))], [(_date(2026, 4, 3), _D("25"))]) == _D("75")
+
+
+def test_derive_liabilities_never_mixes_dates():
+    assert derive_liabilities([], [(_date(2026, 6, 30), _D("100"))], [(_date(2026, 3, 31), _D("25"))]) is None

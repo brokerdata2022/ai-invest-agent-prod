@@ -79,11 +79,36 @@ CONCEPT_URL = "https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/{taxonomy}/
 # спліт-дублікатів — тут дублікат може виникнути і між тегами, не
 # тільки в межах одного тега.
 METRICS: dict[str, list[tuple[str, str]]] = {
+    # Два резервні теги виручки додано 2026-10-22 (пункт 3 плану сесії,
+    # "чому Tier A→B→C майже не змінюється"). Живий замір: 126 тикерів
+    # із 512 не мали свіжої виручки (43 — жодної, 83 — старшої за 200
+    # днів), тобто ЗАВЖДИ падали на Tier B і ніколи не потрапляли в
+    # скринінг. Прямий запит companyfacts до SEC:
+    #   JBHT — RevenueFromContractWithCustomerIncludingAssessedTax до
+    #          2026-06-30, а Revenues лише до 2017-12-31;
+    #   IBKR — RevenuesNetOfInterestExpense (брокери, банки: чиста
+    #          виручка після процентних витрат).
+    # Порядок = пріоритет при однаковому поданні (normalize бере ПЕРШИЙ
+    # варіант за рівного `filed`). `InterestRevenueExpenseNet` (лише
+    # чистий процентний дохід) НЕ додано свідомо: він не вся виручка
+    # банку, і ряд, що перескакує між ним і `Revenues`, дав би хибне
+    # зростання рік-до-року.
     "revenue": [
         ("us-gaap", "Revenues"),
         ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+        ("us-gaap", "RevenueFromContractWithCustomerIncludingAssessedTax"),
+        ("us-gaap", "RevenuesNetOfInterestExpense"),
     ],
-    "net_income": [("us-gaap", "NetIncomeLoss")],
+    # Резервні теги чистого прибутку (2026-10-22, той самий замір, що
+    # для виручки): 23 ряди обривались роками тому — companyfacts SEC:
+    # AMT/BKNG/AEE звітують під NetIncomeLossAvailableToCommonStockholdersBasic
+    # (NetIncomeLoss у них до 2012-2022), AVGO — під ProfitLoss з 2024.
+    # ProfitLoss включає частку меншості — останній за пріоритетом.
+    "net_income": [
+        ("us-gaap", "NetIncomeLoss"),
+        ("us-gaap", "NetIncomeLossAvailableToCommonStockholdersBasic"),
+        ("us-gaap", "ProfitLoss"),
+    ],
     "eps_diluted": [("us-gaap", "EarningsPerShareDiluted")],
     # Резервні теги додані 2026-10-13. Живий замір: 69 тикерів із 512
     # (COIN, DDOG, APP, CVNA, DELL, ABNB, BIIB, DASH, CTSH, EL…) мовчки
@@ -112,6 +137,16 @@ METRICS: dict[str, list[tuple[str, str]]] = {
     ],
     "assets": [("us-gaap", "Assets")],
     "liabilities": [("us-gaap", "Liabilities")],
+    # Для компаній БЕЗ тегу Liabilities (2026-10-22: 136 тикерів із 455
+    # Tier A, з них 14 падали на Tier B лише через це; KO, AEE —
+    # companyfacts SEC: Liabilities немає, а баланс і капітал є).
+    # Зобовʼязання = баланс − капітал рахує АНАЛІЗ (screening/tier_b.py),
+    # адаптер лише забирає обидва сирі рядки (правило 1).
+    "liabilities_and_equity": [("us-gaap", "LiabilitiesAndStockholdersEquity")],
+    "equity": [
+        ("us-gaap", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"),
+        ("us-gaap", "StockholdersEquity"),
+    ],
 }
 
 # Тільки звітні форми — відсікає шум на кшталт 8-K (одноразові події,
@@ -130,6 +165,41 @@ _MIN_QUARTER_DAYS = 75
 _MAX_QUARTER_DAYS = 100
 
 _cik_cache: dict[str, str] = {}  # тикер (upper) -> zero-padded CIK, кеш на процес
+
+
+def ticker_cik_map(user_agent: str, session: Optional[requests.Session] = None) -> dict[str, int]:
+    """{ТИКЕР: CIK} для всього довідника SEC одним запитом — для
+    пакетних джоб (звітність за подією earnings, 2026-10-22), щоб не
+    тягнути той самий файл на кожен тикер."""
+    session = session or requests.Session()
+    response = session.get(TICKERS_URL, headers={"User-Agent": user_agent}, timeout=30)
+    response.raise_for_status()
+    return {
+        str(row.get("ticker", "")).upper(): int(row["cik_str"])
+        for row in response.json().values()
+        if row.get("ticker") and row.get("cik_str") is not None
+    }
+
+
+def lookup_company(ticker: str, user_agent: str, session: Optional[requests.Session] = None) -> Optional[dict]:
+    """`{cik, title}` компанії з довідника SEC (`company_tickers.json`)
+    або None, якщо тикера там немає (не американський емітент, ETF без
+    власного CIK тощо).
+
+    Додано 2026-10-22 для `/watchlist_add`: акція, додана через
+    Telegram, мусить одразу мати CIK (звітність, 10-K/10-Q) і назву
+    компанії (пошук у новинах) — доти не мала ні того, ні іншого.
+    Живо: SKYD → CIK 2041610, "Skydance Corp"."""
+    session = session or requests.Session()
+    response = session.get(TICKERS_URL, headers={"User-Agent": user_agent}, timeout=30)
+    response.raise_for_status()
+    wanted = ticker.strip().upper()
+    for row in response.json().values():
+        if str(row.get("ticker", "")).upper() == wanted:
+            cik = str(row["cik_str"]).zfill(10)
+            _cik_cache[wanted] = cik
+            return {"cik": cik, "title": row.get("title")}
+    return None
 
 
 class SecEdgarAdapter(BaseAdapter):

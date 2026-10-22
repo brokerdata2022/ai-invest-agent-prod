@@ -27,6 +27,21 @@ from telegram_commands import (
     validate_twelvedata_ticker,
 )
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_profile_network(monkeypatch):
+    """`/watchlist_add` з 2026-10-22 ще й визначає профіль активу
+    (тип у Twelve Data, CIK у SEC, друге джерело в Yahoo) — у тестах
+    без мережі: за замовчуванням нічого не знайдено, тест, якому
+    профіль потрібен, підміняє сам."""
+    from common import profile_lookup
+
+    monkeypatch.setattr(profile_lookup, "lookup_instrument", lambda *a, **k: None)
+    monkeypatch.setattr(profile_lookup, "lookup_company", lambda *a, **k: None)
+    monkeypatch.setattr(profile_lookup, "validate_yahoo_symbol", lambda *a, **k: False)
+
 
 # --- parse_command ---
 
@@ -329,6 +344,62 @@ def test_handle_watchlist_add_uses_twelvedata_when_it_confirms(monkeypatch):
     assert "Twelve Data" in text
 
 
+def test_handle_watchlist_add_stock_gets_class_company_and_second_source(monkeypatch):
+    """Живий кейс SKYD (2026-10-22): акцію додано без типу (у списку
+    торгів — "товар"), без CIK і без назви компанії — тож ні звітності,
+    ні новин по компанії. Тепер усе це визначається при додаванні."""
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "test agent test@example.com")
+    monkeypatch.setattr(telegram_commands, "find_asset", lambda conn, asset_id: None)
+    monkeypatch.setattr(telegram_commands, "validate_twelvedata_ticker", lambda ticker, api_key: True)
+    monkeypatch.setattr(telegram_commands, "validate_gdelt_term", lambda term: True)
+    from common import profile_lookup
+
+    monkeypatch.setattr(profile_lookup, "lookup_instrument", lambda query, api_key=None: {
+        "symbol": "SKYD", "instrument_name": "Skydance Corporation Class B Common Stock",
+        "instrument_type": "Common Stock", "exchange": "NYSE", "country": "United States",
+    })
+    monkeypatch.setattr(
+        profile_lookup, "lookup_company",
+        lambda ticker, user_agent: {"cik": "0002041610", "title": "Skydance Corp"},
+    )
+    yahoo_checked = []
+    monkeypatch.setattr(
+        profile_lookup, "validate_yahoo_symbol",
+        lambda asset_id, symbol: yahoo_checked.append(symbol) or True,
+    )
+    added = []
+    monkeypatch.setattr(telegram_commands, "add_asset", lambda conn, **kwargs: added.append(kwargs))
+
+    text = handle_watchlist_add(conn=None, ticker_arg="SKYD", twelvedata_api_key="key")
+
+    row = added[0]
+    profile = row["profile"]
+    assert profile["asset_class"] == "stock"
+    assert profile["cik"] == "0002041610"
+    assert profile["company_name"] == "Skydance Corp"
+    assert row["label"] == "Skydance (SKYD)"
+    # GDELT — назва компанії, не тикер
+    assert row["search_term"] == '"Skydance"'
+    assert r"\bskydance\b" in profile["news_patterns"]
+    assert yahoo_checked == ["SKYD"]
+    assert [c["source"] for c in profile["price_chain"]] == ["twelvedata", "yahoo_chart"]
+    assert profile["price_chain"][0]["metric_id"] == "skyd_close"
+    assert "акція" in text
+
+
+def test_handle_watchlist_add_unknown_type_is_not_guessed(monkeypatch):
+    monkeypatch.setattr(telegram_commands, "find_asset", lambda conn, asset_id: None)
+    monkeypatch.setattr(telegram_commands, "validate_twelvedata_ticker", lambda ticker, api_key: True)
+    monkeypatch.setattr(telegram_commands, "validate_gdelt_term", lambda term: True)
+    added = []
+    monkeypatch.setattr(telegram_commands, "add_asset", lambda conn, **kwargs: added.append(kwargs))
+
+    text = handle_watchlist_add(conn=None, ticker_arg="NATGAS", twelvedata_api_key="key")
+
+    assert added[0]["profile"]["asset_class"] is None
+    assert "тип не визначено" in text
+
+
 def test_handle_watchlist_add_resolves_via_twelvedata_symbol_search_when_exact_fails(monkeypatch):
     # 2026-10-03, живий кейс "NATGAS": точний рядок дав 404 у Twelve
     # Data, але symbol_search знаходить правильний каталожний код (тут
@@ -410,6 +481,8 @@ def test_handle_watchlist_add_falls_back_to_binance_when_twelvedata_does_not_con
     assert added[0]["ticker"] == "BNBUSDT"
     assert added[0]["label"] == "BNB/USDT"
     assert added[0]["search_term"] == '"BNB"'
+    assert added[0]["profile"]["asset_class"] == "crypto"
+    assert r"\bbnb\b" in added[0]["profile"]["news_patterns"]
     assert "Додано" in text
     assert "BNB/USDT" in text
     assert "Binance" in text
@@ -550,24 +623,37 @@ def test_handle_watchlist_remove_not_found(monkeypatch):
     assert "немає" in text
 
 
-def test_handle_watchlist_remove_already_disabled(monkeypatch):
-    monkeypatch.setattr(telegram_commands, "find_asset", lambda conn, asset_id: {"enabled": False, "source": "twelvedata"})
-    text = handle_watchlist_remove(conn=None, asset_arg="gbpusd")
-    assert "уже вимкнений" in text
-
-
-def test_handle_watchlist_remove_disables_enabled_asset(monkeypatch):
+def test_handle_watchlist_remove_deletes_asset_and_derived_analyses(monkeypatch):
+    """2026-10-22 (пункт 2 плану): видалення = видалення, не
+    `enabled = false` — актив зникає з чек-листа й аналізів."""
     monkeypatch.setattr(telegram_commands, "find_asset", lambda conn, asset_id: {"enabled": True, "source": "fred"})
-    disabled_calls = []
+    removed_calls = []
+    monkeypatch.setattr(
+        telegram_commands, "remove_asset",
+        lambda conn, asset_id: removed_calls.append(asset_id) or {
+            "asset_checklists": 1, "fundamental_analysis": 3, "news_synthesis": 2,
+        },
+    )
     monkeypatch.setattr(
         telegram_commands, "set_enabled",
-        lambda conn, asset_id, enabled: disabled_calls.append((asset_id, enabled)),
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("вимикати більше не можна — лише видаляти")),
     )
 
     text = handle_watchlist_remove(conn=None, asset_arg="XAU/USD")
 
-    assert disabled_calls == [("xauusd", False)]
-    assert "вимкнено" in text
+    assert removed_calls == ["xauusd"]
+    assert "видалено" in text
+    assert "чек-лист видалено" in text
+    assert "— 5" in text  # 3 + 2 похідних аналізи
+    assert "Сирі ціни" in text
+
+
+def test_handle_watchlist_remove_also_deletes_previously_disabled_asset(monkeypatch):
+    # Рядки, вимкнені до 2026-10-22, теж видаляються (а не "уже вимкнений").
+    monkeypatch.setattr(telegram_commands, "find_asset", lambda conn, asset_id: {"enabled": False})
+    monkeypatch.setattr(telegram_commands, "remove_asset", lambda conn, asset_id: {})
+    text = handle_watchlist_remove(conn=None, asset_arg="gbpusd")
+    assert "видалено" in text
 
 
 # --- watchlist: process_update dispatch ---
@@ -615,13 +701,14 @@ def test_process_update_watchlist_add_dispatches_with_parsed_args(monkeypatch):
 
 
 def _watchlist_add_with_states(monkeypatch, before, after):
-    """`find_asset` до й після додавання → чи запустився чек-лист."""
+    """`find_asset` до й після додавання → чи запустився онбординг
+    (2026-10-22: дані активу, потім чек-лист)."""
     states = iter([before, after])
     monkeypatch.setattr(telegram_commands, "find_asset", lambda conn, asset_id: next(states))
     monkeypatch.setattr(telegram_commands, "handle_watchlist_add", lambda conn, ticker_arg, twelvedata_api_key: "ok")
     monkeypatch.setattr(telegram_commands, "send_telegram_message", lambda *a, **k: None)
     launched = []
-    monkeypatch.setattr(telegram_commands, "launch_checklist", launched.append)
+    monkeypatch.setattr(telegram_commands, "launch_onboarding", launched.append)
     process_update(_message("/watchlist_add BNB"), configured_chat_id="123456", token="T", conn=object())
     return launched
 
@@ -716,3 +803,54 @@ def test_save_offset_upserts_and_commits():
     assert "INSERT INTO telegram_command_offset" in sql
     assert "ON CONFLICT (id) DO UPDATE" in sql
     assert params == (42,)
+
+
+# --- онбординг нового активу (2026-10-22, живий кейс SKYD) ---
+
+def test_onboarding_collects_company_data_before_checklist_for_stock():
+    """Чек-лист SKYD складався, коли даних компанії в базі ще не було.
+    Тепер для акції спершу ціни, звітність SEC і тексти звітів — і
+    лише потім чек-лист."""
+    from onboard_asset import plan_steps
+
+    steps = [name for name, _ in plan_steps({"asset_id": "skyd", "asset_class": "stock", "ticker": "SKYD"},
+                                            dry_run=False, notify=True)]
+    assert steps == ["ціни", "звітність SEC", "події, інсайдери, аналітики", "тексти 10-K/10-Q", "чек-лист"]
+
+
+def test_onboarding_non_stock_skips_company_steps():
+    from onboard_asset import plan_steps
+
+    steps = [name for name, _ in plan_steps({"asset_id": "bnb", "asset_class": "crypto", "ticker": "BNBUSDT"},
+                                            dry_run=False, notify=True)]
+    assert steps == ["ціни", "чек-лист"]
+
+
+def test_onboarding_dry_run_never_calls_llm():
+    """Дев: токени не витрачаються — тези зі звіту не витягуються,
+    чек-лист лише друкує промпт."""
+    from onboard_asset import plan_steps
+
+    commands = dict(plan_steps({"asset_id": "skyd", "asset_class": "stock", "ticker": "SKYD"},
+                               dry_run=True, notify=True))
+    assert "--collect-only" in commands["тексти 10-K/10-Q"]
+    assert "--dry-run" in commands["чек-лист"]
+    assert "--notify" not in commands["чек-лист"]
+
+
+# --- сесійний бриф (2026-10-22, пункт 5 плану сесії) ---
+
+def test_session_brief_order_trading_list_then_synthesis_then_send():
+    """Бриф мусить показувати СВІЖИЙ список торгів цієї сесії й
+    надсилатись одразу після синтезу, а не окремою джобою за годину."""
+    from session_brief import plan_steps
+
+    names = [name for name, _ in plan_steps("us", dry_run=False)]
+    assert names == ["список для торгів", "синтез сесії", "надсилання"]
+
+
+def test_session_brief_dry_run_never_calls_llm_or_telegram():
+    from session_brief import plan_steps
+
+    for _name, command in plan_steps("asia", dry_run=True):
+        assert "--dry-run" in command

@@ -38,6 +38,10 @@
 класифікацію за секторами).
 """
 
+from typing import Optional
+
+import config
+
 # Той самий перелік, що expectations/synthesize.py:IMPACT_CATEGORIES.
 # Дублюється свідомо (не імпортується): `expectations/` і
 # `trading_list/` — незалежні пакети, а зміна переліку в одному з них
@@ -46,33 +50,50 @@ IMPACT_CATEGORIES = (
     "ставка", "економіка", "валюта", "акції", "крипта", "золото", "інший_актив",
 )
 
-# Категорія макро-впливу → asset_id watchlist-активів, яких вона
-# стосується. asset_id — ті самі, що `watchlist_assets.asset_id`
-# (db/schema.sql seed): xauusd, xagusd, wti_crude, brent_crude,
-# natgas, coffee, eurusd, usdjpy, btc, eth, sol.
+# Категорія макро-впливу → активи списку обраних — ВИВОДИТЬСЯ з класу
+# активу (`watchlist_assets.asset_class`/`commodity_group`) через
+# `config.ASSET_IMPACT_PROFILES`, а не перелічується поіменно.
 #
-# Обґрунтування кожного рядка:
-# - "ставка": змінює очікування щодо ФРС/ЄЦБ → валюти (носій різниці
-#   ставок), золото (безприбуткова альтернатива), крипта (ризиковий
-#   актив, чутливий до ліквідності).
-# - "економіка": сила/слабкість економіки → валюти й промислові
-#   товари (нафта/газ — попит), не кава (агро, свій цикл).
-# - "валюта": прямо валютні пари + золото, бо воно котирується в
-#   доларах і рухається проти DXY.
-# - "акції": ризиковий апетит → крипта як найчутливіший ризиковий
-#   актив; самі акції обробляються окремо (див. MACRO_FLOOR_FOR_STOCKS).
-# - "крипта": BTC/ETH/SOL.
-# - "золото": золото й срібло (срібло йде за золотом з вищою бетою).
-# - "інший_актив": товари.
-CATEGORY_TO_WATCHLIST_ASSETS: dict[str, tuple[str, ...]] = {
-    "ставка": ("eurusd", "usdjpy", "xauusd", "btc", "eth", "sol"),
-    "економіка": ("eurusd", "usdjpy", "wti_crude", "brent_crude", "natgas"),
-    "валюта": ("eurusd", "usdjpy", "xauusd"),
-    "акції": ("btc", "eth", "sol"),
-    "крипта": ("btc", "eth", "sol"),
-    "золото": ("xauusd", "xagusd"),
-    "інший_актив": ("wti_crude", "brent_crude", "natgas", "coffee"),
-}
+# Чому (2026-10-22, живий кейс SKYD). Доти тут стояли дві мапи на 11
+# asset_id: категорія → активи і актив → власна категорія. Актив,
+# доданий через Telegram, не потрапляв у жодну — тобто не отримував
+# жодного макрокаталізатора й жодного власного напрямку, і ніщо про це
+# не казало. Обґрунтування кожної відповідності (чому "ставка" рухає
+# валюти, золото й крипту) тепер стоїть поруч із профілями в config.
+
+
+def profile_key(asset: dict) -> Optional[str]:
+    """Ключ у `config.ASSET_IMPACT_PROFILES`: група для товарів
+    (метал/енергоносій/агро — реагують на різне), клас для решти."""
+    asset_class = asset.get("asset_class")
+    if asset_class == "commodity":
+        return asset.get("commodity_group") or "other"
+    return asset_class
+
+
+def category_map(watchlist: list[dict]) -> dict[str, tuple[str, ...]]:
+    """{категорія: asset_id, на які вона впливає} для поточного списку.
+    Актив без класу не отримує жодної категорії — і це видно в
+    `/watchlist_list` ("тип не визначено"), а не вгадується."""
+    out: dict[str, list[str]] = {}
+    for asset in watchlist:
+        profile = config.ASSET_IMPACT_PROFILES.get(profile_key(asset) or "")
+        if profile is None:
+            continue
+        for category in profile["affected_by"]:
+            out.setdefault(category, []).append(asset["asset_id"])
+    return {category: tuple(ids) for category, ids in out.items()}
+
+
+def native_categories(watchlist: list[dict]) -> dict[str, str]:
+    """{asset_id: ВЛАСНА категорія активу} — див. `is_native_category`."""
+    out: dict[str, str] = {}
+    for asset in watchlist:
+        profile = config.ASSET_IMPACT_PROFILES.get(profile_key(asset) or "")
+        if profile is not None:
+            out[asset["asset_id"]] = profile["native"]
+    return out
+
 
 # Категорії, що дають акціям спільну "підлогу" каталізатора. НЕ
 # підіймають конкретний тикер у топ (див. докстрінг модуля) — лише
@@ -112,12 +133,13 @@ MACRO_DAMPING = 0.25
 STOCK_MACRO_DAMPING = MACRO_DAMPING
 
 
-def watchlist_assets_for_category(category: str) -> tuple[str, ...]:
-    """asset_id watchlist-активів, яких стосується ця категорія.
-    Невідома категорія — порожній кортеж, не виняток: перелік
-    категорій може розширитись у промпті `expectations/synthesize.py`
-    раніше, ніж тут, і це не причина валити весь прогін списку."""
-    return CATEGORY_TO_WATCHLIST_ASSETS.get(category, ())
+def watchlist_assets_for_category(category: str, mapping: dict[str, tuple[str, ...]]) -> tuple[str, ...]:
+    """asset_id активів списку, яких стосується ця категорія
+    (`mapping` — `category_map(watchlist)`). Невідома категорія —
+    порожній кортеж, не виняток: перелік категорій може розширитись у
+    промпті `expectations/synthesize.py` раніше, ніж тут, і це не
+    причина валити весь прогін списку."""
+    return mapping.get(category, ())
 
 
 def category_affects_stocks(category: str) -> bool:
@@ -139,19 +161,9 @@ def category_affects_stocks(category: str) -> bool:
 # Тому: напрямок зараховується ЛИШЕ з власної категорії активу. Хіт із
 # чужої категорії дає вагу (подія справді стосується активу), але
 # напрямок 'neutral' — бо він про інший актив.
-NATIVE_CATEGORY_BY_ASSET: dict[str, str] = {
-    "xauusd": "золото",
-    "xagusd": "золото",
-    "eurusd": "валюта",
-    "usdjpy": "валюта",
-    "btc": "крипта",
-    "eth": "крипта",
-    "sol": "крипта",
-    "wti_crude": "інший_актив",
-    "brent_crude": "інший_актив",
-    "natgas": "інший_актив",
-    "coffee": "інший_актив",
-}
+#
+# Власна категорія активу списку — `native_categories(watchlist)` вище
+# (`config.ASSET_IMPACT_PROFILES[...]["native"]`).
 
 # Власна категорія для АКЦІЙ — одна для всіх тикерів: напрямок ринку
 # акцій це єдине, що макро-вплив може сказати про конкретний тикер
@@ -159,8 +171,10 @@ NATIVE_CATEGORY_BY_ASSET: dict[str, str] = {
 STOCK_NATIVE_CATEGORY = "акції"
 
 
-def is_native_category(asset_id: str, category: str, is_stock: bool = False) -> bool:
-    """Чи цей напрямок стосується САМОГО активу, а не причини."""
+def is_native_category(asset_id: str, category: str, natives: Optional[dict[str, str]] = None,
+                       is_stock: bool = False) -> bool:
+    """Чи цей напрямок стосується САМОГО активу, а не причини.
+    `natives` — `native_categories(watchlist)`."""
     if is_stock:
         return category == STOCK_NATIVE_CATEGORY
-    return NATIVE_CATEGORY_BY_ASSET.get(asset_id) == category
+    return (natives or {}).get(asset_id) == category

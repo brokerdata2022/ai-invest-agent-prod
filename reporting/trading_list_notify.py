@@ -42,6 +42,7 @@ JSONB), текст складається тут. Жодного нового о
 """
 
 import argparse
+import json
 import logging
 from decimal import Decimal
 
@@ -87,6 +88,10 @@ KIND_LABEL = {
     "crypto": "крипта",
     "fx": "валютна пара",
     "commodity": "товар",
+    "index": "індекс",
+    # Клас активу не визначено (`watchlist_assets.asset_class` NULL) —
+    # показуємо прямо, а не вгадуємо "товар" (живий кейс SKYD 2026-10-22).
+    "unknown": "тип не визначено",
 }
 
 # Людські назви джерел причини — для фрази "чому актив у списку".
@@ -97,6 +102,10 @@ REASON_SOURCE_WORD = {
     "release_done": "вийшлі дані",
     "release_upcoming": "очікувані дані",
     "forecast": "наш прогноз",
+    "earnings": "звіт компанії",
+    "price_anomaly": "незвичний рух ціни",
+    "crypto_setup": "сетап ф'ючерса",
+    "discovery": "рух новачка",
 }
 
 
@@ -134,7 +143,7 @@ def fetch_unnotified(conn, horizon: str = HORIZON) -> list[dict]:
     return fetch_dicts(
         conn,
         """
-        SELECT id, asset_id, label, kind, direction, score, reasons
+        SELECT id, asset_id, label, kind, direction, score, reasons, levels, why, source
         FROM trading_list
         WHERE horizon = %s
           AND notified_at IS NULL
@@ -222,12 +231,99 @@ def explain(reasons: list[dict]) -> list[str]:
             lines.append(f"🔮 Наш прогноз {metric_label(mid)} — {word}")
         break
 
+    # Власні події активу (2026-10-22, пункт 4 плану сесії) — доти ці
+    # типи причин у тексті не показувались узагалі, хоча саме вони
+    # роблять актив кандидатом сьогодні.
+    for reason in reasons:
+        if reason.get("kind") == "earnings":
+            lines.append(f"🧾 Звіт компанії {reason.get('when') or ''}: {trim(reason.get('detail') or 'дата відома, результат ще ні')}")
+            break
+    for reason in reasons:
+        if reason.get("kind") == "price_anomaly" and reason.get("detail"):
+            lines.append(f"⚡ Незвичний для цього активу рух: {trim(reason['detail'], 90)}")
+            break
+    for reason in reasons:
+        if reason.get("kind") == "crypto_setup":
+            lines.append(f"🪙 Сетап ф'ючерса: {trim(reason.get('detail') or DIRECTION_WORD.get(reason.get('direction') or '', ''), 120)}")
+            break
+    for reason in reasons:
+        if reason.get("kind") == "discovery" and reason.get("detail"):
+            lines.append(f"🆕 Новачок — ще не в наших списках: {trim(reason['detail'], 120)}")
+            break
+
     for reason in reasons:
         if reason.get("kind") == "trend" and reason.get("detail"):
             lines.append(f"📈 Тренд: {trim(reason['detail'], 90)}")
             break
 
     return lines
+
+
+def fmt_price(value) -> str:
+    """Ціна читабельно: 4194.5 → 4,194.50; 7.87 → 7.87; 0.000123 → 0.000123."""
+    try:
+        number = Decimal(str(value))
+    except Exception:
+        return str(value)
+    if abs(number) >= 1:
+        return f"{number:,.2f}"
+    return f"{number:.4g}"
+
+
+def format_levels(levels) -> str:
+    """Рівні з `trading_list.levels` (analysis/trading_list/scoring.py:
+    price_levels) — де ціна відносно недавнього діапазону і який денний
+    рух для активу звичайний. Опис, не вказівка входу."""
+    if not levels:
+        return ""
+    if isinstance(levels, str):
+        levels = json.loads(levels)
+    if "high" not in levels:
+        note = levels.get("note") or ""
+        return f"📏 Ціна {fmt_price(levels.get('last'))}" + (f" ({note})" if note else "")
+    parts = [
+        f"ціна {fmt_price(levels['last'])}",
+        f"макс {levels['days']} дн {fmt_price(levels['high'])} ({levels['to_high_pct']}%)",
+        f"мін {fmt_price(levels['low'])} ({levels['to_low_pct']}%)",
+    ]
+    if levels.get("daily_move_pct"):
+        parts.append(f"звичайний денний рух ±{levels['daily_move_pct']}%")
+    return "📏 Рівні: " + "; ".join(parts)
+
+
+def fetch_latest_run(conn, horizon: str = HORIZON):
+    """Останній прогін (`trading_list_runs`) — зокрема порожній."""
+    rows = fetch_dicts(
+        conn,
+        """
+        SELECT run_at, evaluated, passed, rejected, notified_at
+        FROM trading_list_runs
+        WHERE horizon = %s
+        ORDER BY run_at DESC
+        LIMIT 1
+        """,
+        (horizon,),
+    )
+    return rows[0] if rows else None
+
+
+def format_empty(run: dict) -> str:
+    """Порожній прогін — ПРЯМО: торгувати сьогодні нічим, і чому
+    (пункт 4 плану сесії: "якщо немає — прямо сказати")."""
+    rejected = run.get("rejected") or {}
+    if isinstance(rejected, str):
+        rejected = json.loads(rejected)
+    lines = [
+        bold("🎯 Активи для торгів сьогодні — немає"),
+        f"<i>Розглянуто {run.get('evaluated', 0)} активів з усіх списків; жоден не має "
+        f"власного каталізатора сьогодні з однозначним напрямком.</i>",
+    ]
+    if rejected:
+        lines.append("")
+        for reason, bucket in sorted(rejected.items(), key=lambda kv: -kv[1].get("count", 0)):
+            examples = ", ".join(bucket.get("examples") or [])
+            lines.append(f"• {escape_html(reason)}: {bucket.get('count', 0)}" + (f" (напр. {escape_html(examples)})" if examples else ""))
+    return "\n".join(lines)
 
 
 def _reason_key(reason: dict) -> tuple:
@@ -281,8 +377,8 @@ def asset_specific(reasons: list[dict]) -> list[dict]:
 
 def format_message(rows: list[dict]) -> str:
     lines = [
-        bold(f"🎯 Активи для розгляду — {len(rows)}"),
-        "<i>Середньостроковий горизонт: дні-тижні</i>",
+        bold(f"🎯 Активи для торгів сьогодні — {len(rows)}"),
+        "<i>Лише ті, у кого є власна подія сьогодні й однозначний напрямок</i>",
         "",
     ]
 
@@ -322,6 +418,10 @@ def format_message(rows: list[dict]) -> str:
             # честніше, ніж лишати порожній рядок.
             lines.append("   <i>власних новин немає — тренд і макро-фон</i>")
 
+        levels_line = format_levels(row.get("levels"))
+        if levels_line:
+            lines.append(f"   {escape_html(levels_line)}")
+
         lines.append("")
 
     lines.append("<i>ℹ️ Перелік для розгляду з напрямком сигналу, не вказівка діяти.</i>")
@@ -339,16 +439,33 @@ def main() -> None:
 
     conn = get_connection()
     try:
+        run = fetch_latest_run(conn, horizon=args.horizon)
         rows = fetch_unnotified(conn, horizon=args.horizon)
         if not rows:
-            logger.info("Нових активів у торговому списку немає — не надсилаємо")
+            # Порожній ОСТАННІЙ прогін — теж відповідь, і її треба
+            # надіслати (один раз): інакше користувач не відрізнить
+            # "сьогодні нічого" від "агент мовчить".
+            if run and run["passed"] == 0 and run["notified_at"] is None:
+                send_telegram_message(token, chat_id, format_empty(run), parse_mode="HTML")
+                mark_run_notified(conn, run["run_at"])
+                logger.info("Надіслано: сьогодні активів для торгів немає")
+            else:
+                logger.info("Нових активів у торговому списку немає — не надсилаємо")
             return
 
         send_telegram_message(token, chat_id, format_message(rows), parse_mode="HTML")
         mark_notified(conn, "trading_list", [row["id"] for row in rows])
+        if run:
+            mark_run_notified(conn, run["run_at"])
         logger.info("Надіслано в Telegram: %d активів", len(rows))
     finally:
         conn.close()
+
+
+def mark_run_notified(conn, run_at) -> None:
+    with conn.cursor() as cur:
+        cur.execute("UPDATE trading_list_runs SET notified_at = now() WHERE run_at = %s", (run_at,))
+    conn.commit()
 
 
 if __name__ == "__main__":

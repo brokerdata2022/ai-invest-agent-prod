@@ -27,7 +27,11 @@ from assistant.context import (
 )
 from assistant.resolve import looks_like_question, resolve_assets, resolve_tickers
 
-TERMS = config.ASSISTANT_ASSET_TERMS
+from _schema_seed import seeded_patterns
+
+# `watchlist_assets.ask_patterns` — рівно те, що кладе в БД схема
+# (2026-10-22, доти `config.ASSISTANT_ASSET_TERMS`).
+TERMS = seeded_patterns("ask_patterns")
 
 
 # ============================================================
@@ -43,8 +47,8 @@ TERMS = config.ASSISTANT_ASSET_TERMS
     ("what about gold today", "xauusd"),
 ])
 def test_recognizes_ukrainian_and_english_asset_names(question, expected):
-    """Питання будуть українською, а `WATCHLIST_MATCH_TERMS` — це
-    англомовні регулярки для новинного корпусу; тому словник свій."""
+    """Питання будуть українською, а `news_patterns` — це англомовні
+    регулярки для новинного корпусу; тому колонка своя."""
     assert expected in resolve_assets(question, TERMS, limit=3)
 
 

@@ -16,6 +16,7 @@ docs/decisions.md 2026-10-03) обмежено `DYNAMICALLY_ADDABLE_SOURCES` —
 немає.
 """
 
+import json
 import logging
 from typing import NamedTuple, Optional
 
@@ -36,7 +37,17 @@ DYNAMICALLY_ADDABLE_SOURCES = frozenset({"twelvedata"})
 # терміни (dict.get -> None).
 _COLUMNS = (
     "asset_id, source, metric_id, ticker, label, search_term, "
-    "search_term_status, enabled"
+    "search_term_status, enabled, "
+    # Профіль активу (2026-10-22, db/schema.sql): тип і все, що доти
+    # жило хардкодом у семи місцях коду.
+    "asset_class, commodity_group, company_name, cik, "
+    "news_patterns, ask_patterns, price_chain"
+)
+
+# Колонки профілю, які можна записати `set_profile()` / `add_asset()`.
+PROFILE_FIELDS = (
+    "asset_class", "commodity_group", "company_name", "cik",
+    "news_patterns", "ask_patterns", "price_chain",
 )
 
 
@@ -108,6 +119,7 @@ def fetch_watchlist_health(conn) -> list[dict]:
             """
             SELECT w.asset_id, w.label, w.source, w.metric_id, w.enabled,
                    w.search_term, w.search_term_status, w.added_via,
+                   w.asset_class, w.commodity_group,
                    p.value AS price, p.observed_at
             FROM watchlist_assets w
             LEFT JOIN (
@@ -178,6 +190,7 @@ def add_asset(
     conn, asset_id: str, source: str, metric_id: str,
     ticker: Optional[str], label: str, search_term: Optional[str],
     search_term_status: str = TERM_VALIDATED,
+    profile: Optional[dict] = None,
 ) -> None:
     """Викликач (telegram_commands.py) МАЄ перевірити find_asset() is
     None заздалегідь для зрозумілого повідомлення користувачу — тут
@@ -201,6 +214,79 @@ def add_asset(
         )
     conn.commit()
     logger.info("watchlist_assets: додано %s (%s/%s)", asset_id, source, metric_id)
+    if profile:
+        set_profile(conn, asset_id, profile)
+
+
+def set_profile(conn, asset_id: str, profile: dict) -> bool:
+    """Записати поля профілю активу (`PROFILE_FIELDS`). Невідомий ключ —
+    виняток: тихо проігнорована колонка — рівно той клас дефектів,
+    від якого цей профіль і рятує. `price_chain` — список словників,
+    пишеться як JSONB."""
+    unknown = set(profile) - set(PROFILE_FIELDS)
+    if unknown:
+        raise ValueError(f"Невідомі поля профілю активу: {sorted(unknown)}")
+    if not profile:
+        return False
+    fields = list(profile)
+    values = [
+        json.dumps(profile[f], ensure_ascii=False) if f == "price_chain" and profile[f] is not None
+        else profile[f]
+        for f in fields
+    ]
+    assignments = ", ".join(
+        f"{f} = %s::jsonb" if f == "price_chain" else f"{f} = %s" for f in fields
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE watchlist_assets SET {assignments} WHERE asset_id = %s",
+            (*values, asset_id),
+        )
+        updated = cur.rowcount > 0
+    conn.commit()
+    if updated:
+        logger.info("watchlist_assets: %s профіль %s", asset_id, ", ".join(fields))
+    return updated
+
+
+def price_chain(row: dict) -> list[SourceCandidate]:
+    """Кандидати джерела ціни В ПОРЯДКУ ПРІОРИТЕТУ з `price_chain`
+    рядка. Порожній ланцюжок — лише власне джерело рядка.
+
+    Замінює `orchestration/jobs.py:_FALLBACK_CHAINS` (хардкод на 8
+    активів, 2026-10-04…22): актив, доданий через Telegram, резерву не
+    мав ніколи."""
+    chain = row.get("price_chain") or []
+    if isinstance(chain, str):
+        chain = json.loads(chain)
+    candidates = [
+        SourceCandidate(item["source"], item["metric_id"], item.get("ticker"))
+        for item in chain
+        if item.get("source") and item.get("metric_id")
+    ]
+    return candidates or [SourceCandidate(row["source"], row["metric_id"], row.get("ticker"))]
+
+
+def fetch_patterns(conn, column: str, enabled_only: bool = True) -> dict[str, tuple[str, ...]]:
+    """{asset_id: регулярки} з `news_patterns` чи `ask_patterns` —
+    замість `config.WATCHLIST_MATCH_TERMS` / `ASSISTANT_ASSET_TERMS`.
+    Актив без термінів у словник не потрапляє."""
+    if column not in ("news_patterns", "ask_patterns"):
+        raise ValueError(f"Невідома колонка термінів: {column!r}")
+    return {
+        row["asset_id"]: tuple(row[column])
+        for row in fetch_watchlist(conn, enabled_only=enabled_only)
+        if row.get(column)
+    }
+
+
+def fetch_stocks(conn, enabled_only: bool = True) -> list[dict]:
+    """Акції списку обраних — їм потрібна звітність SEC, тексти
+    10-K/10-Q і новини по тикеру, як акціям зі скринінгу."""
+    return [
+        row for row in fetch_watchlist(conn, enabled_only=enabled_only)
+        if row.get("asset_class") == "stock" and row.get("ticker")
+    ]
 
 
 def set_search_term(conn, asset_id: str, search_term: Optional[str]) -> bool:
@@ -312,3 +398,77 @@ def set_enabled(conn, asset_id: str, enabled: bool) -> bool:
     if updated:
         logger.info("watchlist_assets: %s enabled=%s", asset_id, enabled)
     return updated
+
+
+# Похідні таблиці, з яких актив прибирається при видаленні (2026-10-22,
+# пункт 2 плану сесії: "видалення = видалення"). (таблиця, колонка, умова)
+# — умова "watchlist" обмежує рядки, що походять саме зі списку обраних.
+_DERIVED_BY_ASSET = (
+    ("asset_checklists", "asset_id", None),
+    ("fundamental_analysis", "asset_id", None),
+    ("news_synthesis", "asset_id", None),
+    ("news_consolidated", "asset_id", None),
+    ("trading_list", "asset_id", "source = 'watchlist'"),
+)
+
+
+def _in_latest_screening(cur, ticker: str) -> bool:
+    cur.execute(
+        """
+        SELECT 1 FROM screening_results
+        WHERE upper(ticker) = %s AND run_at = (SELECT MAX(run_at) FROM screening_results)
+        LIMIT 1
+        """,
+        (ticker.upper(),),
+    )
+    return cur.fetchone() is not None
+
+
+def remove_asset(conn, asset_id: str) -> Optional[dict]:
+    """ВИДАЛИТИ актив зі списку обраних: рядок `watchlist_assets`, його
+    чек-лист і всі ПОХІДНІ аналізи (фундаментальний аналіз, синтез
+    ціна↔новини, консолідовані новини, рядки списку торгів). Одна
+    транзакція: або все, або нічого. None — активу немає.
+
+    Що НЕ видаляється, і чому:
+    - сирі дані — ціни в `raw_observations`, 8-K, Form 4, тексти
+      звітів, календар звітності (правило 6: сирі дані не видаляються
+      ніколи; повернутий актив одразу матиме історію);
+    - `decision_outcomes` — журнал того, що агент радив і чи мав рацію.
+      Видалити його означало б переписати власну статистику влучань;
+    - `news_analysis` — класифікація сирих статей, живе разом із
+      `raw_news` 48 годин і прибирається сама.
+
+    Для АКЦІЇ новини й тези звіту, записані під тикером ("SKYD"),
+    прибираються лише якщо тикера немає в останньому скринінгу — інакше
+    вони належать скринінгу, а не списку обраних.
+
+    Доти `/watchlist_remove` лише ставив `enabled = false`, і актив
+    лишався в чек-листах, аналізах і списку торгів (живий фідбек
+    користувача 2026-10-22)."""
+    asset = find_asset(conn, asset_id)
+    if asset is None:
+        return None
+
+    removed: dict[str, int] = {}
+    try:
+        with conn.cursor() as cur:
+            keys = [asset_id]
+            ticker = (asset.get("ticker") or "").upper()
+            if asset.get("asset_class") == "stock" and ticker and not _in_latest_screening(cur, ticker):
+                keys.append(ticker)
+                cur.execute("DELETE FROM filing_insights WHERE upper(ticker) = %s", (ticker,))
+                removed["filing_insights"] = cur.rowcount
+
+            for table, column, condition in _DERIVED_BY_ASSET:
+                where = f"{column} = ANY(%s)" + (f" AND {condition}" if condition else "")
+                cur.execute(f"DELETE FROM {table} WHERE {where}", (keys,))
+                removed[table] = cur.rowcount
+
+            cur.execute("DELETE FROM watchlist_assets WHERE asset_id = %s", (asset_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    logger.info("watchlist_assets: %s ВИДАЛЕНО разом із похідними: %s", asset_id, removed)
+    return removed

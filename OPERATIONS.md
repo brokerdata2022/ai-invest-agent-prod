@@ -210,7 +210,7 @@ bash scripts/restore_db.sh ~/резерв-2026-10-13.sql.gz
 
 ## Керування через Telegram
 
-Кожна з 56 джоб має однойменну команду бота — повний список з описами
+Кожна з 58 джоб має однойменну команду бота — повний список з описами
 видає `/help`. Найуживаніші:
 
 | Команда | Що робить |
@@ -219,8 +219,8 @@ bash scripts/restore_db.sh ~/резерв-2026-10-13.sql.gz
 | `/daily_digest` | дайджест найважливішого за добу |
 | `/notify_watchlist` | поточні ціни watchlist-активів |
 | `/notify_screening` | скринінг S&P 500 |
-| `/notify_trading_list` | список активів для розгляду |
-| `/notify_market_synthesis` | стан ринку (сесійний синтез) |
+| `/notify_trading_list` | список активів для торгів сьогодні |
+| `/notify_market_synthesis` | стан ринку (сесійний синтез, якщо бриф його ще не надіслав) |
 | `/notify_policy_rate` | прогноз рішення по ставці |
 | `/notify_candidates` | нові кандидати-новачки |
 | `/notify_crypto_screening` | крипто-кандидати SHORT/WATCH |
@@ -236,8 +236,14 @@ bash scripts/restore_db.sh ~/резерв-2026-10-13.sql.gz
 ```
 
 Агент пробує Twelve Data, потім Binance spot на тому самому тикері —
-не вгадує джерело за форматом рядка. Нові FRED-серії й CoinGecko-метрики
-й далі вимагають коду.
+не вгадує джерело за форматом рядка. Тип активу (акція/крипта/валюта/
+товар/індекс), назва компанії й CIK, терміни пошуку новин і друге
+джерело ціни (Yahoo) визначаються при додаванні; для акції одразу
+запускається онбординг (`orchestration/onboard_asset.py`): історія цін,
+звітність SEC, 8-K/Form 4/консенсус, текст 10-K/10-Q — і лише тоді
+чек-лист. `/watchlist_remove` **видаляє** актив разом із чек-листом і
+похідними аналізами; сирі ціни й звітність лишаються в базі. Нові
+FRED-серії й CoinGecko-метрики й далі вимагають коду.
 
 Якщо «/»-меню бота порожнє:
 
@@ -289,7 +295,7 @@ docker compose exec db psql -U invest_agent -d invest_agent -c \
 
 ## Розклад
 
-**56 джоб**, часовий пояс `Europe/Kyiv`. Єдине місце для зміни
+**58 джоб**, часовий пояс `Europe/Kyiv`. Єдине місце для зміни
 періодичності — `orchestration/schedule.py` (запис джоби може мати
 власний `timezone` — для привʼязки до відкриття конкретного ринку).
 Що саме робить кожна — [docs/jobs.md](docs/jobs.md).
@@ -501,7 +507,7 @@ docker compose restart scheduler
 ```bash
 # 1. ДО: зафіксувати поточний вивід
 docker compose exec db psql -U invest_agent -d invest_agent -c \
-  "select asset_id, catalyst_score from trading_list order by created_at desc limit 20" \
+  "select asset_id, catalyst_score from trading_list order by run_at desc limit 20" \
   > /tmp/before.txt
 
 # 2. правка + тести
@@ -512,10 +518,10 @@ docker compose exec app python analysis/trading_list/run_trading_list.py
 
 # 4. ПІСЛЯ: той самий запит і порівняння
 docker compose exec db psql -U invest_agent -d invest_agent -c \
-  "select asset_id, catalyst_score from trading_list order by created_at desc limit 20" \
+  "select asset_id, catalyst_score from trading_list order by run_at desc limit 20" \
   > /tmp/after.txt
 diff /tmp/before.txt /tmp/after.txt
 ```
 
 Вивід **не змінився** там, де мусив, — або всі значення **однакові** —
-це і є дефект, навіть якщо всі 1633 тести зелені.
+це і є дефект, навіть якщо всі 1722 тести зелені.

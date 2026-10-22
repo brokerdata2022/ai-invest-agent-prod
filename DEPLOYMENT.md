@@ -125,7 +125,7 @@ docker compose up -d --build
 |---|---|
 | `db` | PostgreSQL 16 + TimescaleDB, порт тільки на `127.0.0.1` |
 | `app` | контейнер із кодом; `sleep infinity`, для ручних команд |
-| `scheduler` | APScheduler — виконує 56 джоб, `restart: unless-stopped` |
+| `scheduler` | APScheduler — виконує 58 джоб, `restart: unless-stopped` |
 
 Перевірити:
 
@@ -178,7 +178,7 @@ bash scripts/restore_db.sh
 docker compose exec app pytest -q
 ```
 
-Очікується **1633 passed**. Ключі для цього не потрібні — тести
+Очікується **1722 passed**. Ключі для цього не потрібні — тести
 перевіряють код і не торкаються ні мережі, ні бази, тож проходять і
 на незаповненому `.env`. Якщо падають —
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
@@ -189,7 +189,7 @@ docker compose exec app pytest -q
 docker compose exec app python orchestration/register_telegram_commands.py
 ```
 
-Наповнює «/»-меню бота назвами й описами всіх 56 джоб. Разова дія
+Наповнює «/»-меню бота назвами й описами всіх 58 джоб. Разова дія
 (повторити лише після додавання нової джоби).
 
 ### Крок 7. Засіяти календар релізів
@@ -209,7 +209,7 @@ docker compose exec app python orchestration/run_job.py refresh_calendar
 docker compose logs --tail 60 scheduler
 ```
 
-У логах мусить бути перелік 56 джоб із часом наступного запуску.
+У логах мусить бути перелік 58 джоб із часом наступного запуску.
 
 Перший живий звіт — найближчою Telegram-джобою за розкладом. Не чекати:
 
@@ -221,7 +221,7 @@ docker compose exec app python orchestration/run_job.py notify_watchlist
 
 ### Після відновлення
 
-**Усі 56 джоб уже працюють** — агент повноцінний, нічого доналаштовувати
+**Усі 58 джоб уже працюють** — агент повноцінний, нічого доналаштовувати
 не треба. Переконатися:
 
 ```bash
@@ -389,13 +389,45 @@ docker compose exec app python data-ingestion/apply_schema.py
 Безпечно повторювати: усі `CREATE` — з `IF NOT EXISTS`, усі `INSERT` —
 з `ON CONFLICT DO NOTHING`.
 
+### 4а. Лише при оновленні з версії до 2026-10-22: профіль активів
+
+Схема заповнює тип, терміни пошуку й ланцюжок джерел для ПОЧАТКОВИХ
+активів сама. Активи, додані через Telegram раніше (напр. SKYD), треба
+заповнити разово — тип перевіряється живим запитом до Twelve Data/SEC:
+
+```bash
+docker compose exec app python data-ingestion/backfill_watchlist_profile.py --dry-run
+```
+
+Якщо вивід правильний (SKYD — `"asset_class": "stock"`, CIK), записати:
+
+```bash
+docker compose exec app python data-ingestion/backfill_watchlist_profile.py
+```
+
+Для кожної АКЦІЇ зі списку — онбординг (звітність SEC, 8-K, Form 4,
+консенсус, текст 10-Q, чек-лист від ШІ з блоком компанії; один виклик
+ШІ на тези звіту й один на чек-лист):
+
+```bash
+docker compose exec app python orchestration/onboard_asset.py --asset skyd --notify
+```
+
+Нові теги SEC (виручка, прибуток, баланс — 126 тикерів S&P 500 доти не
+мали свіжої виручки) підхопляться в неділю (`companies_universe_refresh`,
+тепер ~40 хв). Щоб скринінг побачив їх одразу:
+
+```bash
+docker compose exec app python orchestration/run_job.py companies_universe_refresh
+```
+
 ### 5. Перевірити код
 
 ```bash
 docker compose exec app pytest -q
 ```
 
-Очікувано: `1633 passed` за ~10-15 секунд.
+Очікувано: `1722 passed` за ~10-15 секунд.
 
 > **Якщо оновлюєтесь із версії до 2026-10-15** — зверніть увагу:
 > раніше цей самий `pytest` **виконував пʼять джоб по-справжньому**.
@@ -416,8 +448,9 @@ docker compose exec app python orchestration/register_telegram_commands.py
 Наповнює «/»-меню бота назвами й описами джоб. Потрібно лише коли
 оновлення додало джоби — наприклад, у версії 2026-10-15 їх стало 54
 замість 48 (самоконтроль і календар звітності), у версії 2026-10-20 —
-56 (`factor_series`, `factor_crosscheck`). Без цього нові
-команди все одно працюють, просто не підказуються в меню.
+56 (`factor_series`, `factor_crosscheck`), у версії 2026-10-22 — 58
+(`earnings_filings`, `company_data`) і нові описи брифів. Без цього
+нові команди все одно працюють, просто не підказуються в меню.
 
 ### 7. Переконатися, що планувальник узявся до роботи
 

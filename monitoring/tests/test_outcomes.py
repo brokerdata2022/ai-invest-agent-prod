@@ -145,3 +145,12 @@ def test_watchlist_crypto_is_not_futures():
     """`crypto` з watchlist — це btc/eth/sol зі спота в БД, не
     ф'ючерсний символ."""
     assert _venue_for_trading_list("crypto", "watchlist") == VENUE_DB_WATCHLIST
+
+
+def test_discovery_sources_route_to_their_price_venue():
+    """Новачки в списку торгів (2026-10-22): крипта — ф'ючерсний
+    символ, акція — котирування акцій. Інакше наслідок завжди
+    'unavailable'."""
+    assert _venue_for_trading_list("crypto", "discovery") == VENUE_BINANCE_FUTURES
+    assert _venue_for_trading_list("stock", "discovery") == VENUE_DB_STOCK
+    assert _venue_for_trading_list("stock", "watchlist") == VENUE_DB_STOCK

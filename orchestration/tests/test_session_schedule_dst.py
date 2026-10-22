@@ -31,7 +31,11 @@ SESSIONS = [
 SUMMER = datetime(2026, 7, 15, 0, 0)
 WINTER = datetime(2026, 1, 15, 0, 0)
 
-EXPECTED_LAG_MINUTES = 20
+# Бриф — ЗА `config.SESSION_PREOPEN_MINUTES` ДО відкриття (2026-10-22,
+# пункт 5 плану сесії; доти — +20 хв після). Від'ємний зсув.
+import config  # noqa: E402
+
+EXPECTED_LAG_MINUTES = -config.SESSION_PREOPEN_MINUTES
 
 
 def _next_fire_utc(job_name: str, after_local_midnight: datetime) -> datetime:

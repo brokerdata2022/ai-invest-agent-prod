@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from quotes.twelvedata_adapter import TwelveDataAdapter, search_symbol
+from quotes.twelvedata_adapter import TwelveDataAdapter, lookup_instrument, search_symbol
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -205,3 +205,36 @@ def test_search_symbol_returns_none_on_request_error(monkeypatch):
             raise requests.exceptions.ConnectionError("boom")
 
     assert search_symbol("x", api_key="test-key", session=_FailingSession()) is None
+
+
+# --- lookup_instrument() (2026-10-22, живий кейс SKYD — тип активу) ---
+
+def test_lookup_instrument_returns_type_and_name():
+    session = _FakeSearchSession({"data": [{
+        "symbol": "SKYD", "instrument_name": "Skydance Corporation Class B Common Stock",
+        "instrument_type": "Common Stock", "exchange": "NYSE", "country": "United States",
+    }]})
+    result = lookup_instrument("SKYD", session=session)
+
+    assert result["instrument_type"] == "Common Stock"
+    assert result["instrument_name"].startswith("Skydance")
+    # symbol_search працює без ключа — без нього параметра немає взагалі
+    assert session.captured["params"] == {"symbol": "SKYD"}
+
+
+def test_lookup_instrument_prefers_exact_us_symbol_over_first_row():
+    # Живо 2026-10-22: той самий тикер на BMV (Мексика) іде в
+    # результатах поруч із NYSE; брати треба США.
+    session = _FakeSearchSession({"data": [
+        {"symbol": "SKYDW", "instrument_type": "Warrant", "country": "United States"},
+        {"symbol": "SKYD", "instrument_type": "Common Stock", "exchange": "BMV", "country": "Mexico"},
+        {"symbol": "SKYD", "instrument_type": "Common Stock", "exchange": "NYSE", "country": "United States"},
+    ]})
+    result = lookup_instrument("skyd", session=session)
+
+    assert result["symbol"] == "SKYD"
+    assert result["exchange"] == "NYSE"
+
+
+def test_lookup_instrument_none_without_matches():
+    assert lookup_instrument("x", session=_FakeSearchSession({"data": []})) is None

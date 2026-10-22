@@ -67,8 +67,15 @@ ORIGIN_CONFIG = "config"
 ORIGIN_LLM = "llm"
 ORIGIN_DEFAULT = "default"
 
-# Додаються до кожного чек-листа завжди — ШІ їх не обирає.
-RESERVED_KEYS = ("price", "news", "synthesis")
+# Додаються до кожного чек-листа завжди — ШІ їх не обирає. Для акції
+# ще й блок компанії (`config.CHECKLIST_COMPANY_FACTORS`, 2026-10-22).
+RESERVED_KEYS = ("price", "news", "synthesis") + tuple(
+    key for key, _ in config.CHECKLIST_COMPANY_FACTORS
+)
+
+
+def is_stock(asset: dict) -> bool:
+    return asset.get("asset_class") == "stock"
 
 _MAX_LABEL_CHARS = 160
 _MAX_GAP_CHARS = 160
@@ -190,6 +197,15 @@ def build_prompt(asset: dict, catalog: list[CatalogEntry]) -> str:
     ]
     for entry in catalog:
         lines.append(f"- {entry.key} — {entry.label} — {entry.last_observed_at}")
+    if is_stock(asset):
+        lines.append("")
+        lines.append(
+            "Це АКЦІЯ: блок даних компанії (квартальна звітність SEC, тези "
+            "з останнього 10-K/10-Q, корпоративні події 8-K, угоди інсайдерів "
+            "Form 4, консенсус аналітиків і free float) додається до "
+            "чек-листа завжди — не обирай його, обери макро- й галузеві "
+            "чинники поверх нього."
+        )
     lines.append("")
     lines.append("Склади чек-лист чинників для цього активу.")
     return "\n".join(lines)
@@ -238,7 +254,8 @@ def assemble_specs(asset: dict, chosen: list[tuple[str, str]], catalog_labels: d
     береться опис із каталогу."""
     label = asset.get("label") or asset["asset_id"]
     middle = tuple((key, text or catalog_labels.get(key, key)) for key, text in chosen)
-    return (("price", f"Ціна: {label}"),) + middle + (
+    company = config.CHECKLIST_COMPANY_FACTORS if is_stock(asset) else ()
+    return (("price", f"Ціна: {label}"),) + company + middle + (
         ("news", "Новинний фон"),
         ("synthesis", "Звʼязок ціни з новинами"),
     )
@@ -292,8 +309,14 @@ def save(conn, asset_id: str, chosen: list[tuple[str, str]], gaps: list[str],
 
 # --- вирішення чек-листа ---------------------------------------------
 
-def default_checklist(asset_id: str) -> Checklist:
-    return Checklist(asset_id, config.DEFAULT_ASSET_FACTORS, (), ORIGIN_DEFAULT)
+def default_checklist(asset_id: str, stock: bool = False) -> Checklist:
+    """Універсальний набір; для акції — з блоком компанії одразу після
+    ціни (без нього аналіз акції на "ставці й новинах" — рівно те, що
+    вийшло для SKYD 2026-10-22)."""
+    specs = config.DEFAULT_ASSET_FACTORS
+    if stock:
+        specs = specs[:1] + config.CHECKLIST_COMPANY_FACTORS + specs[1:]
+    return Checklist(asset_id, specs, (), ORIGIN_DEFAULT)
 
 
 def _from_stored(asset: dict, stored: dict, catalog: list[CatalogEntry]) -> Checklist:
@@ -339,7 +362,7 @@ def resolve_checklist(conn, asset: dict, watchlist: list[dict],
     if stored and not force and (stored["catalog_fingerprint"] == fingerprint or not allow_generate):
         return _from_stored(asset, stored, catalog)
     if not allow_generate:
-        return default_checklist(asset_id)
+        return default_checklist(asset_id, is_stock(asset))
 
     try:
         chosen, gaps, rejected, llm_call_id = generate(conn, asset, catalog)
@@ -349,7 +372,7 @@ def resolve_checklist(conn, asset: dict, watchlist: list[dict],
         if stored:
             logger.warning("%s: лишаю попередній чек-лист (каталог відтоді змінився)", asset_id)
             return _from_stored(asset, stored, catalog)
-        return default_checklist(asset_id)
+        return default_checklist(asset_id, is_stock(asset))
 
     if rejected:
         logger.warning("%s: відкинуто ключі поза каталогом: %s", asset_id, rejected)

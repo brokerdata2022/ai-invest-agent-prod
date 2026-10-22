@@ -4,7 +4,6 @@ from decimal import Decimal
 import news_analysis.prices as prices_module
 from news_analysis.prices import (
     ANOMALY_MIN_HISTORY,
-    ASSET_PRICE_SOURCES,
     _resolve_price_source,
     compute_pct_change,
     fetch_latest_observed_at,
@@ -41,77 +40,40 @@ def test_compute_pct_change_no_movement():
     assert change.pct_change == Decimal("0")
 
 
-def test_asset_price_sources_known_watchlist_assets():
-    # 2026-10-04: xauusd перемкнуто з twelvedata на tradingeconomics --
-    # НЕ через застарілість, а через нестабільні заднім числом ревізії
-    # Twelve Data forex-OTC котирування (той самий 2026-09-28 отримав
-    # 2 ревізії з різницею 81 пункт).
-    assert ASSET_PRICE_SOURCES["xauusd"] == ("tradingeconomics", "xauusd")
-    # 2026-10-04 (critical rule 7, CLAUDE.md): coffee/wti_crude/
-    # brent_crude/natgas -- усі чотири товарні FRED-серії застрягли чи
-    # мали принципово недостатню частоту -- перемкнуто на
-    # tradingeconomics (commodities/tradingeconomics_adapter.py,
-    # справжній автоматизований скрапінг на розкладі, не ручний
-    # крос-чек) -- "один працюючий код", не разовий фікс на кожен актив.
-    assert ASSET_PRICE_SOURCES["coffee"] == ("tradingeconomics", "coffee")
-    assert ASSET_PRICE_SOURCES["wti_crude"] == ("tradingeconomics", "wti_crude")
-    assert ASSET_PRICE_SOURCES["brent_crude"] == ("tradingeconomics", "brent_crude")
-    assert ASSET_PRICE_SOURCES["natgas"] == ("tradingeconomics", "natgas")
+# Живий список у тестах — те, що віддав би
+# `common/watchlist_db.py:fetch_price_sources(conn)`. Хардкоду в модулі
+# більше немає (2026-10-22), тож кожен тест передає джерела явно.
+_LIVE = {
+    "wti_crude": ("yahoo_chart", "wti_crude"),
+    "brent_crude": ("yahoo_chart", "brent_crude"),
+    "usdjpy": ("yahoo_chart", "usdjpy"),
+    "gbpusd": ("twelvedata", "gbpusd_close"),
+}
 
 
-def test_asset_price_sources_eurusd_usdjpy_use_twelvedata_not_fred():
-    # 2026-10-02: перейшли з FRED (DEXUSEU/DEXJPUS) на Twelve Data --
-    # живо підтверджено на fred.stlouisfed.org, що обидві FRED-серії
-    # застрягли на 2026-09-25 (Next Release Date: 2026-10-05) попри
-    # заявлену щоденну частоту -- не наш баг збору, затримка публікації
-    # на боці джерела. Стара fred-серія "usdjpy_fx_rate" лишається в
-    # raw_observations назавжди (rule 6 CLAUDE.md), просто вже не
-    # поточне джерело для цих asset_id.
-    assert ASSET_PRICE_SOURCES["eurusd"] == ("twelvedata", "eurusd_close")
-    assert ASSET_PRICE_SOURCES["usdjpy"] == ("twelvedata", "usdjpy_close")
+def test_prices_module_has_no_hardcoded_source_map():
+    # 2026-10-22: `ASSET_PRICE_SOURCES` двічі тихо розходився з
+    # таблицею (2026-10-02, 2026-10-13). Повернення хардкоду мусить
+    # ламати тест, а не поведінку.
+    assert not hasattr(prices_module, "ASSET_PRICE_SOURCES")
 
 
-def test_asset_price_sources_crypto_uses_binance_not_twelvedata_fallback():
-    # 2026-10-02: без явного мапінгу тут _resolve_price_source() гадав
-    # twelvedata-конвенцію для btc/eth/sol, де даних для крипти ніколи
-    # не було -- fetch_price_change() завжди повертав None.
-    assert ASSET_PRICE_SOURCES["btc"] == ("binance", "btc_close")
-    assert ASSET_PRICE_SOURCES["eth"] == ("binance", "eth_close")
-    assert ASSET_PRICE_SOURCES["sol"] == ("binance", "sol_close")
-
-
-def test_asset_price_sources_xagusd_uses_coingecko_not_twelvedata():
-    # xagusd заблоковано тарифом ЛИШЕ на Twelve Data (docs/decisions.md
-    # 2026-09-26) -- ціна вже йде через CoinGecko (kinesis-silver
-    # токен-проксі), fallback на twelvedata-конвенцію тут був хибним.
-    assert ASSET_PRICE_SOURCES["xagusd"] == ("coingecko", "xagusd_close")
-
-
-def test_resolve_price_source_uses_explicit_mapping_when_known():
-    assert _resolve_price_source("usdjpy") == ("twelvedata", "usdjpy_close")
+def test_resolve_price_source_uses_live_mapping_when_known():
+    assert _resolve_price_source("usdjpy", _LIVE) == ("yahoo_chart", "usdjpy")
 
 
 def test_resolve_price_source_falls_back_to_twelvedata_convention_for_ticker():
-    # тикер зі скринінгу (docs/decisions.md, "Ціль 2") -- не в
-    # ASSET_PRICE_SOURCES, здогад за конвенцією twelvedata_adapter.py.
-    assert _resolve_price_source("AAPL") == ("twelvedata", "aapl_close")
+    # тикер зі скринінгу (docs/decisions.md, "Ціль 2") -- не в живому
+    # списку, здогад за конвенцією twelvedata_adapter.py.
+    assert _resolve_price_source("AAPL", _LIVE) == ("twelvedata", "aapl_close")
 
 
 def test_resolve_price_source_fallback_lowercases_ticker():
-    assert _resolve_price_source("NVDA") == ("twelvedata", "nvda_close")
+    assert _resolve_price_source("NVDA", {}) == ("twelvedata", "nvda_close")
 
 
-def test_resolve_price_source_uses_explicit_price_sources_when_given():
-    # 2026-10-03: живий (редагований через Telegram) список —
-    # common/watchlist_db.py:fetch_price_sources(conn) — перекриває
-    # статичний ASSET_PRICE_SOURCES, коли переданий явно.
-    live_sources = {"gbpusd": ("twelvedata", "gbpusd_close")}
-    assert _resolve_price_source("gbpusd", live_sources) == ("twelvedata", "gbpusd_close")
-
-
-def test_resolve_price_source_explicit_price_sources_still_falls_back_for_unknown():
-    live_sources = {"gbpusd": ("twelvedata", "gbpusd_close")}
-    assert _resolve_price_source("AAPL", live_sources) == ("twelvedata", "aapl_close")
+def test_resolve_price_source_uses_telegram_added_asset():
+    assert _resolve_price_source("gbpusd", _LIVE) == ("twelvedata", "gbpusd_close")
 
 
 # --- Регресія 2026-09-29: fetch_price_change() поверне None однаково і
@@ -149,20 +111,20 @@ class _FakeConn:
 
 def test_fetch_latest_observed_at_returns_none_when_never_collected():
     conn = _FakeConn((None,))
-    assert fetch_latest_observed_at(conn, "wti_crude") is None
+    assert fetch_latest_observed_at(conn, "wti_crude", price_sources=_LIVE) is None
 
 
 def test_fetch_latest_observed_at_returns_date_ignoring_window():
     conn = _FakeConn((date(2026, 9, 22),))
-    assert fetch_latest_observed_at(conn, "wti_crude") == date(2026, 9, 22)
+    assert fetch_latest_observed_at(conn, "wti_crude", price_sources=_LIVE) == date(2026, 9, 22)
 
 
 def test_fetch_latest_observed_at_uses_resolved_source_and_no_days_filter():
     conn = _FakeConn((None,))
-    fetch_latest_observed_at(conn, "wti_crude")
+    fetch_latest_observed_at(conn, "wti_crude", price_sources=_LIVE)
     query, params = conn.cursor_obj.executed
     assert "days" not in query  # на відміну від fetch_price_change — вікно тут навмисно не застосовується
-    assert params == ("tradingeconomics", "wti_crude")  # 2026-10-04: wti_crude перемкнуто на tradingeconomics
+    assert params == ("yahoo_chart", "wti_crude")
 
 
 def test_fetch_latest_observed_at_honors_explicit_price_sources():
@@ -212,7 +174,7 @@ def test_fetch_price_change_returns_none_when_latest_point_is_stale():
     stale_end = date.today() - timedelta(days=10)
     stale_start = stale_end - timedelta(days=1)
     conn = _FakeRowsConn([(stale_start, "120.00"), (stale_end, "113.96")])
-    assert fetch_price_change(conn, "brent_crude") is None
+    assert fetch_price_change(conn, "brent_crude", price_sources=_LIVE) is None
 
 
 def test_fetch_price_change_returns_result_when_latest_point_is_fresh():
@@ -221,7 +183,7 @@ def test_fetch_price_change_returns_result_when_latest_point_is_fresh():
     fresh_end = date.today()
     fresh_start = fresh_end - timedelta(days=1)
     conn = _FakeRowsConn([(fresh_start, "100.00"), (fresh_end, "105.00")])
-    change = fetch_price_change(conn, "brent_crude")
+    change = fetch_price_change(conn, "brent_crude", price_sources=_LIVE)
     assert change is not None
     assert change.pct_change == Decimal("5")
 
@@ -239,7 +201,7 @@ def test_fetch_price_history_returns_chronological_order(monkeypatch):
         prices_module, "fetch_recent",
         lambda conn, source, metric_id, limit: newest_first,
     )
-    history = fetch_price_history(conn=None, asset_id="wti_crude", limit=10)
+    history = fetch_price_history(conn=None, asset_id="wti_crude", limit=10, price_sources=_LIVE)
     assert history == [Decimal("101"), Decimal("102"), Decimal("103")]
 
 
@@ -307,21 +269,14 @@ def test_fetch_price_history_respects_live_price_sources(monkeypatch):
     )
 
     assert seen["source"] == "yahoo_chart", (
-        "живий список джерел мусить перекривати хардкод ASSET_PRICE_SOURCES"
+        "джерело мусить братись із живого списку"
     )
 
 
-def test_fetch_price_history_still_falls_back_to_hardcoded_map(monkeypatch):
-    """Без живого списку поведінка лишається попередньою — щоб
-    викликачі, які його не мають, не зламались."""
-    from news_analysis import prices as prices_module
+def test_fetch_price_history_requires_live_price_sources():
+    """Без живого списку виклик тепер ПАДАЄ, а не тихо читає хардкод
+    (2026-10-22): саме тиха підміна джерела й була дефектом 2026-10-13."""
+    import pytest
 
-    seen = {}
-
-    def fake_fetch_recent(conn, source, metric_id, limit):
-        seen["source"] = source
-        return [{"value": Decimal("1")}]
-
-    monkeypatch.setattr(prices_module, "fetch_recent", fake_fetch_recent)
-    prices_module.fetch_price_history(conn=None, asset_id="wti_crude")
-    assert seen["source"] == prices_module.ASSET_PRICE_SOURCES["wti_crude"][0]
+    with pytest.raises(TypeError):
+        fetch_price_history(conn=None, asset_id="wti_crude")

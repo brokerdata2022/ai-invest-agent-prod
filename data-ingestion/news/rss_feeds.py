@@ -63,7 +63,7 @@ raw_payload.
    `watchlist` (новини ПО КОНКРЕТНОМУ активу) **резерв отримав
    2026-10-12**, коли GDELT провалив усі 4 прогони за добу й потік
    дав 0 статей. Резерв — не новий фід, а ПОШУК у вже зібраному
-   корпусі цих самих фідів: `config.WATCHLIST_MATCH_TERMS` +
+   корпусі цих самих фідів: `watchlist_assets.news_patterns` +
    `run_news_analysis.py:matched_watchlist_assets()` показують моделі
    geopolitical/general-статтю, заголовок якої збігся з
    watchlist-терміном (детермінований префільтр; `asset_id` і далі

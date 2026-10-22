@@ -54,7 +54,8 @@ Telegram") — НЕ з реєстру JOBS, своя гілка диспетче
   адаптері без прямого символьного параметра, новий актив ТАМ і далі
   вимагає коду — користувачу не потрібно знати, яке джерело спробувати,
   команда сама перебирає все доступне.
-- /watchlist_remove <asset_id|TICKER> — вимикає (enabled=false).
+- /watchlist_remove <asset_id|TICKER> — ВИДАЛЯЄ актив зі списку, чек-листа й
+  похідних аналізів (2026-10-22; доти лише enabled=false). Сирі дані лишаються.
 
 Використання:
     python telegram_commands.py
@@ -83,6 +84,7 @@ from _common import bold, escape_html  # noqa: E402
 from command_descriptions import INFO_JOB_NAMES, JOB_DESCRIPTIONS, SPECIAL_COMMAND_DESCRIPTIONS  # noqa: E402
 from common.db import get_connection  # noqa: E402
 from common.freshness import is_stale  # noqa: E402
+from common import asset_profile, profile_lookup  # noqa: E402
 from common.watchlist_db import (  # noqa: E402
     TERM_PENDING,
     TERM_REJECTED,
@@ -90,6 +92,7 @@ from common.watchlist_db import (  # noqa: E402
     add_asset,
     fetch_watchlist_health,
     find_asset,
+    remove_asset,
     set_enabled,
 )
 from crypto.binance_adapter import BinanceAdapter  # noqa: E402
@@ -169,6 +172,27 @@ _TERM_LABEL = {
 }
 
 
+# Людська назва класу активу (`watchlist_assets.asset_class`,
+# 2026-10-22). Невизначений клас показується ЯВНО: доти SKYD тихо
+# ставав "товаром" у списку торгів, і з бота цього не було видно.
+_CLASS_LABEL = {
+    "stock": "акція",
+    "crypto": "крипта",
+    "fx": "валютна пара",
+    "commodity": "товар",
+    "index": "індекс",
+}
+_GROUP_LABEL = {"metal": "метал", "energy": "енергоносій", "agri": "агро"}
+
+
+def class_label(asset_class: str | None, commodity_group: str | None = None) -> str:
+    if asset_class is None:
+        return "⚠️ тип не визначено"
+    label = _CLASS_LABEL.get(asset_class, asset_class)
+    group = _GROUP_LABEL.get(commodity_group or "")
+    return f"{label}, {group}" if group else label
+
+
 def format_watchlist_list(rows: list[dict]) -> str:
     """Звіт про СТАН списку обраних, не просто перелік назв.
 
@@ -185,7 +209,8 @@ def format_watchlist_list(rows: list[dict]) -> str:
     lines = [bold(f"📋 Watchlist — стан списку ({len(active)} активних)"), ""]
     for row in rows:
         source = escape_html(row["source"])
-        head = f"• {bold(row['asset_id'])} — {escape_html(row['label'])} ({source})"
+        kind = class_label(row.get("asset_class"), row.get("commodity_group"))
+        head = f"• {bold(row['asset_id'])} — {escape_html(row['label'])} · {kind} ({source})"
         if not row.get("enabled", True):
             head += " · <i>вимкнено</i>"
         if row.get("added_via") == "telegram":
@@ -312,6 +337,11 @@ def _resolve_news_search_term(primary: str, widened: str | None = None) -> tuple
     return None, TERM_REJECTED
 
 
+def _class_note(profile: dict) -> str:
+    sources = " + ".join(c["source"] for c in profile["price_chain"])
+    return f" Тип: {class_label(profile['asset_class'], profile['commodity_group'])}; джерела ціни: {sources}."
+
+
 def _try_add_via_twelvedata(conn, ticker_arg: str, asset_id: str, twelvedata_api_key: str | None) -> str | None:
     """None = не підтвердило (чи немає ключа) — викликач пробує
     наступне джерело. Не окрема відмова для ЦЬОГО джерела — остаточна
@@ -338,14 +368,34 @@ def _try_add_via_twelvedata(conn, ticker_arg: str, asset_id: str, twelvedata_api
         resolved = candidate
 
     metric_id = f"{asset_id}_close"
-    search_term, term_status = _resolve_news_search_term(resolved)
+    # Тип інструмента — з того самого Twelve Data (`symbol_search`, без
+    # кредитів), CIK і назва — з SEC. Доти тип не визначався зовсім, і
+    # акція SKYD у списку торгів стала "товаром" (живий кейс 2026-10-22).
+    described = profile_lookup.describe_twelvedata(resolved, twelvedata_api_key)
+    asset_class, name = described["asset_class"], described["name"]
+    clean = asset_profile.clean_name(name)
+    label = profile_lookup.stock_label(asset_class, resolved, name)
+    profile = profile_lookup.build_profile(
+        asset_id, asset_class, described["commodity_group"], resolved, name,
+        primary=asset_profile.chain_entry("twelvedata", metric_id, resolved),
+        cik=described.get("cik"),
+    )
+
+    # GDELT для акції — назва компанії, не тикер: "SKYD" як фраза
+    # загальна, "Skydance" — ні.
+    search_term, term_status = _resolve_news_search_term(
+        clean if asset_class == "stock" and clean else resolved,
+    )
     add_asset(
         conn, asset_id=asset_id, source="twelvedata", metric_id=metric_id,
-        ticker=resolved, label=resolved, search_term=search_term,
-        search_term_status=term_status,
+        ticker=resolved, label=label, search_term=search_term,
+        search_term_status=term_status, profile=profile,
     )
     note = _term_note(term_status)
-    return f"✅ Додано {bold(resolved)} у watchlist (asset_id={asset_id}, джерело: Twelve Data){note}."
+    return (
+        f"✅ Додано {bold(escape_html(label))} у watchlist (asset_id={asset_id}, джерело: Twelve Data)."
+        f"{_class_note(profile)}{note}"
+    )
 
 
 def _try_add_via_binance(conn, asset_id: str) -> str | None:
@@ -364,13 +414,20 @@ def _try_add_via_binance(conn, asset_id: str) -> str | None:
     # відхиляє як "too short" (той самий "Uber"-урок) — "crypto"
     # додає контекст/довжину без зміни суті пошуку.
     search_term, term_status = _resolve_news_search_term(base, widened=f"{base} crypto")
+    profile = profile_lookup.build_profile(
+        asset_id, "crypto", None, symbol, None,
+        primary=asset_profile.chain_entry("binance", metric_id, symbol),
+    )
     add_asset(
         conn, asset_id=asset_id, source="binance", metric_id=metric_id,
         ticker=symbol, label=label, search_term=search_term,
-        search_term_status=term_status,
+        search_term_status=term_status, profile=profile,
     )
     note = _term_note(term_status)
-    return f"✅ Додано {bold(label)} у watchlist (asset_id={asset_id}, джерело: Binance){note}."
+    return (
+        f"✅ Додано {bold(label)} у watchlist (asset_id={asset_id}, джерело: Binance)."
+        f"{_class_note(profile)}{note}"
+    )
 
 
 def handle_watchlist_add(conn, ticker_arg: str, twelvedata_api_key: str | None) -> str:
@@ -409,22 +466,26 @@ def handle_watchlist_add(conn, ticker_arg: str, twelvedata_api_key: str | None) 
 
 
 def handle_watchlist_remove(conn, asset_arg: str) -> str:
+    """ВИДАЛЯЄ актив (2026-10-22, пункт 2 плану сесії): зі списку,
+    чек-листа й усіх похідних аналізів (`watchlist_db.remove_asset`).
+    Доти — лише `enabled = false`, і актив лишався в чек-листах,
+    аналізах і списку торгів. Сирі ціни лишаються (правило 6) — тому
+    повернутий згодом актив одразу матиме історію."""
     asset_arg = asset_arg.strip()
     if not asset_arg:
         return "Вкажіть актив, напр. /watchlist_remove GBP/USD"
 
     asset_id = normalize_ticker_to_asset_id(asset_arg)
-    existing = find_asset(conn, asset_id)
-    if existing is None:
+    if find_asset(conn, asset_id) is None:
         return f"❓ {bold(asset_id)} немає у watchlist."
-    if not existing["enabled"]:
-        return f"{bold(asset_id)} уже вимкнений."
 
-    # Вимкнути можна БУДЬ-ЯКИЙ актив незалежно від джерела (на відміну
-    # від watchlist_add, де обмеження лише на ДОДАВАННЯ нового —
-    # DYNAMICALLY_ADDABLE_SOURCES тут не застосовується).
-    set_enabled(conn, asset_id, False)
-    return f"🗑 {bold(asset_id)} вимкнено з watchlist."
+    removed = remove_asset(conn, asset_id) or {}
+    analyses = sum(n for table, n in removed.items() if table != "asset_checklists")
+    checklist = "чек-лист видалено" if removed.get("asset_checklists") else "чек-листа не було"
+    return (
+        f"🗑 {bold(asset_id)} видалено зі списку: {checklist}, похідних аналізів прибрано — {analyses}. "
+        f"Сирі ціни й звітність лишились у базі (не видаляються ніколи)."
+    )
 
 
 def launch_job(job_name: str) -> None:
@@ -437,16 +498,17 @@ def launch_job(job_name: str) -> None:
     )
 
 
-def launch_checklist(asset_id: str) -> None:
-    """Неблокуючий запуск складання чек-листа чинників для щойно
-    доданого активу (2026-10-20): користувач одразу отримує окреме
-    повідомлення, ЗА ЧИМ агент тепер аналізуватиме актив, — а не
-    дізнається про це з аналізу наступного дня. `Popen`, як
-    `launch_question`: виклик ШІ триває секунди, поллер не чекає."""
+def launch_onboarding(asset_id: str) -> None:
+    """Неблокуючий онбординг щойно доданого активу
+    (`orchestration/onboard_asset.py`, 2026-10-22): глибока історія
+    цін, для акції — звітність SEC і тексти 10-K/10-Q, і лише ПОТІМ
+    чек-лист із `--notify`. Доти тут запускався одразу чек-лист, і для
+    SKYD він складався, коли даних компанії в базі ще не було.
+    `Popen`, як `launch_question`: поллер не чекає."""
     subprocess.Popen(
         [
             sys.executable,
-            str(REPO_ROOT / "analysis" / "fundamental" / "build_checklist.py"),
+            str(REPO_ROOT / "orchestration" / "onboard_asset.py"),
             "--asset", asset_id,
             "--notify",
         ],
@@ -538,7 +600,7 @@ def process_update(
         send_telegram_message(token, configured_chat_id, reply, parse_mode="HTML")
         after = find_asset(conn, asset_id) if asset_id else None
         if after and after["enabled"] and not (before and before["enabled"]):
-            launch_checklist(asset_id)
+            launch_onboarding(asset_id)
     elif command == "watchlist_remove":
         reply = handle_watchlist_remove(conn, parse_command_args(text))
         send_telegram_message(token, configured_chat_id, reply, parse_mode="HTML")

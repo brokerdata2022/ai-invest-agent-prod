@@ -68,6 +68,9 @@ def _build_watchlist_queries() -> list[str]:
         terms = fetch_terms(conn)
     finally:
         conn.close()
+    if not terms:
+        logger.warning("Жодного перевіреного GDELT-терміну у списку обраних — запиту немає")
+        return []
     return [build_watchlist_query(terms)]
 
 
@@ -136,7 +139,7 @@ def main() -> None:
             # exit(1) з обґрунтуванням "у цього потоку РЕЗЕРВУ НЕМА",
             # і це було правдою. Тепер неправда: резерв є —
             # детермінований пошук watchlist-термінів у вже зібраному
-            # RSS-корпусі (`config.WATCHLIST_MATCH_TERMS` +
+            # RSS-корпусі (`watchlist_assets.news_patterns` +
             # `run_news_analysis.py:matched_watchlist_assets`), тому
             # недоступність GDELT більше не означає втрату потоку.
             #
@@ -158,7 +161,7 @@ def main() -> None:
             logger.error(
                 "Усі GDELT-запити (%s) провалились — працюємо на резерві: "
                 "пошук watchlist-термінів у вже зібраному RSS-корпусі "
-                "(config.WATCHLIST_MATCH_TERMS). Обсяг менший за цільовий "
+                "(watchlist_assets.news_patterns). Обсяг менший за цільовий "
                 "запит GDELT; на новому IP перевірити, чи бан діє.",
                 args.stream,
             )

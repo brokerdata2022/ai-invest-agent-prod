@@ -66,6 +66,31 @@ class TierBResult:
     liabilities_to_assets: Decimal
 
 
+def derive_liabilities(
+    liabilities: list[tuple[date, Decimal]],
+    liabilities_and_equity: list[tuple[date, Decimal]],
+    equity: list[tuple[date, Decimal]],
+) -> Optional[Decimal]:
+    """Останні зобовʼязання: тег `Liabilities`, а якщо його немає —
+    баланс (`LiabilitiesAndStockholdersEquity`) мінус власний капітал на
+    ТУ САМУ дату. Ряди — за спаданням дати.
+
+    Чому (2026-10-22, замір "чому Tier B майже не змінюється"): 136 з
+    455 тикерів Tier A не мали `Liabilities` у SEC (KO, AEE…), і
+    критерій боргу для них не рахувався зовсім — 14 падали лише через
+    це. Різниця на різні дати дала б фантомне число, тому лише на ту
+    саму."""
+    if liabilities:
+        return liabilities[0][1]
+    if not liabilities_and_equity or not equity:
+        return None
+    equity_by_date = dict(equity)
+    for when, total in liabilities_and_equity:
+        if when in equity_by_date:
+            return total - equity_by_date[when]
+    return None
+
+
 def all_positive_last_n(series: list[tuple[date, Decimal]], n: int = MIN_PROFITABLE_QUARTERS) -> bool:
     """series — [(дата, значення), ...] відсортовано за СПАДАННЯМ дати."""
     if len(series) < n:
@@ -184,6 +209,14 @@ def run_tier_b(tier_a_tickers: Optional[list[str]] = None) -> list[TierBResult]:
             conn, "sec_edgar", [f"{t}_assets" for t in tier_a_tickers],
             max_age_days=SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
         )
+        balance_by = batch_series(
+            conn, "sec_edgar", [f"{t}_liabilities_and_equity" for t in tier_a_tickers],
+            max_age_days=SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
+        )
+        equity_by = batch_series(
+            conn, "sec_edgar", [f"{t}_equity" for t in tier_a_tickers],
+            max_age_days=SCREENING_FUNDAMENTALS_MAX_AGE_DAYS,
+        )
 
         passed: list[TierBResult] = []
         for ticker in tier_a_tickers:
@@ -193,7 +226,11 @@ def run_tier_b(tier_a_tickers: Optional[list[str]] = None) -> list[TierBResult]:
             shares = shares_by.get(f"{ticker}_shares_outstanding", [])
             liabilities_series = liabilities_by.get(f"{ticker}_liabilities", [])
             assets_series = assets_by.get(f"{ticker}_assets", [])
-            liabilities = liabilities_series[0][1] if liabilities_series else None
+            liabilities = derive_liabilities(
+                liabilities_series,
+                balance_by.get(f"{ticker}_liabilities_and_equity", []),
+                equity_by.get(f"{ticker}_equity", []),
+            )
             assets = assets_series[0][1] if assets_series else None
 
             ok, details = passes_tier_b(net_income, revenue, eps, shares, liabilities, assets)

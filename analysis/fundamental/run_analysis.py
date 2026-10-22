@@ -165,6 +165,9 @@ def analyze_watchlist_asset(conn, asset: dict, watchlist: list[dict], dry_run: b
         price_source=asset["source"],
         price_metric_id=asset["metric_id"],
         checklist=checklist,
+        # Для акції списку — блок компанії (звітність, тези зі звіту)
+        # читається за тикером (2026-10-22).
+        ticker=asset.get("ticker") if asset.get("asset_class") == "stock" else None,
     )
 
     logger.info("%s: чек-лист — %s (%d чинників)", asset_id, checklist.origin, len(checklist.specs))

@@ -20,7 +20,10 @@ LLM (`fundamental_llm.py`).
 - `"yoy:source:metric_id"` — РІЧНА зміна у відсотках, порахована
   кодом;
 - `"asset:<asset_id>"` — ціна ІНШОГО активу watchlist через його
-  поточне джерело (чек-листи від ШІ, `fundamental/checklist.py`).
+  поточне джерело (чек-листи від ШІ, `fundamental/checklist.py`);
+- `"company:fundamentals"` / `"company:filing"` — блок даних компанії
+  для АКЦІЇ списку (2026-10-22): квартальна звітність SEC EDGAR і тези
+  з останнього 10-K/10-Q (`config.CHECKLIST_COMPANY_FACTORS`).
 
 Для факторних рядів (`config.FACTOR_SERIES`) до чинника додається
 позначка довіри — звірено / одне джерело / розійшлись / застаріло.
@@ -266,9 +269,192 @@ def _factor_series_metric(key: str) -> Optional[str]:
     return metric_id
 
 
+def _company_fundamentals(conn, ticker: str) -> list[str]:
+    """Рядок на показник: "Виручка: 2025-06-30: 3.69 млрд, …" —
+    квартальна звітність SEC EDGAR, від старішого до новішого."""
+    from fundamental._db import fetch_fundamental_series
+    from fundamental.fundamental_llm import _fmt
+
+    lines = []
+    for suffix, metric_label in config.FUNDAMENTAL_METRICS:
+        # Нуль у звітності — не значення, а відсутність (живо SKYD:
+        # "Активи 0" у кварталах shell-компанії до злиття). У промпті він
+        # читався б як "активів немає".
+        points = [
+            p for p in fetch_fundamental_series(conn, ticker, suffix, config.QUARTERS)
+            if p["value"] not in (0, None)
+        ]
+        if points:
+            rendered = ", ".join(f"{p['observed_at']}: {_fmt(p['value'])}" for p in points)
+            lines.append(f"{metric_label}: {rendered}")
+    return lines
+
+
+def _company_factor(conn, key: str, ticker: Optional[str]) -> tuple[list[str], Optional[str]]:
+    """(тексти, причина відсутності) для ключа блоку компанії."""
+    from fundamental._db import fetch_company_events, fetch_insider_transactions, fetch_snapshot
+
+    if not ticker:
+        return [], "тикер компанії невідомий"
+    if key == "company:fundamentals":
+        texts, missing = _company_fundamentals(conn, ticker), f"звітності SEC EDGAR по {ticker} у базі ще немає"
+    elif key == "company:filing":
+        texts, missing = _company_filing(conn, ticker), f"тези зі звіту 10-K/10-Q по {ticker} ще не витягнуто"
+    elif key == "company:events":
+        days = config.COMPANY_EVENTS_LOOKBACK_DAYS
+        texts = format_events(fetch_company_events(conn, ticker, days, config.COMPANY_EVENTS_PROMPT_LIMIT))
+        missing = f"подань 8-K за {days} дн у базі немає"
+    elif key == "company:insiders":
+        days = config.INSIDER_LOOKBACK_DAYS
+        rows = fetch_insider_transactions(conn, ticker, days)
+        texts = format_insiders(rows, days, config.INSIDER_PROMPT_LIMIT) if rows else []
+        missing = f"угод Form 4 за {days} дн у базі немає"
+    elif key == "company:analysts":
+        texts = format_analysts(fetch_snapshot(conn, ticker, SNAPSHOT_SOURCES, SNAPSHOT_FIELDS))
+        missing = f"знімка аналітиків по {ticker} ще немає"
+    else:
+        return [], f"невідомий ключ блоку компанії {key!r}"
+    return texts, (None if texts else missing)
+
+
+def _company_filing(conn, ticker: str) -> list[str]:
+    """Тези з ТЕКСТУ останнього звіту (`filing_insights`): що компанія
+    сама називає причинами — те, чого в цифрах немає."""
+    from fundamental._db import fetch_latest_filing_insight
+
+    insight = fetch_latest_filing_insight(conn, ticker)
+    if not insight:
+        return []
+    lines = [f"{insight.get('form', '10-K/10-Q')} від {insight.get('filing_date', '')}: {insight.get('summary') or ''}".strip()]
+    for key, title in (("drivers", "Причини за словами компанії"), ("risks", "Суттєві ризики"),
+                       ("changes", "Що змінилось у формулюваннях")):
+        items = insight.get(key) or []
+        if items:
+            lines.append(f"{title}: " + "; ".join(str(item) for item in items))
+    return lines
+
+
+# Звідки знімок аналітиків/float: три незалежні джерела + SEC (акції
+# в обігу з титулки звіту) — `companies/analyst_adapters.py`.
+SNAPSHOT_SOURCES = ("nasdaq_analyst", "finviz", "stockanalysis", "sec_edgar")
+SNAPSHOT_FIELDS = (
+    "target_mean", "target_low", "target_high", "analyst_count",
+    "rating_buy", "rating_hold", "rating_sell", "recommendation",
+    "float_shares", "shares_outstanding", "insider_own_pct", "short_float_pct",
+)
+
+
+def format_events(rows: list[dict]) -> list[str]:
+    """Рядок на 8-K: дата, форма, що сталось (коди пунктів людською)."""
+    from companies.sec_events_adapter import describe_items
+
+    return [f"{r['filing_date']} {r['form']}: {describe_items(list(r['items'] or []))}" for r in rows]
+
+
+def format_insiders(rows: list[dict], days: int, limit: int) -> list[str]:
+    """Підсумок ринкових угод (купівлі/продажі — сигнал рішення
+    інсайдера) + останні угоди. Гранти, придбання в емітента, опціони,
+    утримання податку — не ринкові угоди: їх видно, але в підсумок вони
+    не йдуть, інакше щоквартальний грант читався б як "купівля"."""
+    from companies.sec_events_adapter import MARKET_CODES, TRANSACTION_LABELS
+    from fundamental.fundamental_llm import _fmt
+
+    def totals(code: str) -> tuple[int, Decimal, Decimal]:
+        picked = [r for r in rows if r["code"] == code]
+        shares = sum((Decimal(r["shares"] or 0) for r in picked), Decimal(0))
+        value = sum((Decimal(r["shares"] or 0) * Decimal(r["price"] or 0) for r in picked), Decimal(0))
+        return len(picked), shares, value
+
+    buys, sells = totals("P"), totals("S")
+    if buys[0] or sells[0]:
+        lines = [
+            f"Ринкові угоди за {days} дн: купівель {buys[0]} ({_fmt(buys[1])} шт ≈ ${_fmt(buys[2])}), "
+            f"продажів {sells[0]} ({_fmt(sells[1])} шт ≈ ${_fmt(sells[2])})"
+        ]
+    else:
+        lines = [f"Ринкових купівель/продажів інсайдерами за {days} дн не було"]
+
+    for r in rows[:limit]:
+        when = r["transaction_date"] or r["filing_date"]
+        label = TRANSACTION_LABELS.get(r["code"], r["code"])
+        marker = "" if r["code"] in MARKET_CODES else " [не ринкова угода]"
+        price = f" по ${_fmt(r['price'])}" if r["price"] else ""
+        derivative = " (дериватив)" if r["derivative"] else ""
+        lines.append(
+            f"{when} {r['owner_name']} ({r['owner_role']}): {label} {_fmt(r['shares'] or 0)} — "
+            f"{r['security']}{derivative}{price}{marker}"
+        )
+    return lines
+
+
+def _verdict_text(field: str, values: dict) -> str:
+    from common.consensus import AGREE, INSUFFICIENT, OUTLIER, SourceValue, reconcile
+    from fundamental.fundamental_llm import _fmt
+
+    verdict = reconcile(
+        field, [SourceValue(src, Decimal(v)) for src, (v, _d) in values.items()],
+        config.COMPANY_CONSENSUS_TOLERANCE_PCT.get(field, Decimal("10")),
+    )
+    if verdict.status == AGREE:
+        return f"звірено: згода (розкид {verdict.max_spread_pct:.1f}%)"
+    if verdict.status == OUTLIER:
+        return f"викид {', '.join(verdict.outliers)}; узгоджене значення {_fmt(verdict.consensus)}"
+    if verdict.status == INSUFFICIENT:
+        return "одне джерело, звірки немає"
+    return (
+        f"ДЖЕРЕЛА РОЗІЙШЛИСЬ (розкид {verdict.max_spread_pct:.0f}%) — рахують різне "
+        f"або на різну дату; не спирайся на одне число"
+    )
+
+
+def format_analysts(snapshot: dict) -> list[str]:
+    """Ціль, float і акції в обігу — КОЖНЕ джерело зі своєю датою і
+    вердиктом звірки (живий кейс SKYD: float 536.7 млн проти 4.10 млрд
+    — одне вибране число тут було б неправдою)."""
+    from fundamental.fundamental_llm import _fmt
+
+    lines = []
+    for field, title in (
+        ("target_mean", "Цільова ціна аналітиків"),
+        ("float_shares", "Free float, акцій"),
+        ("shares_outstanding", "Акцій в обігу"),
+    ):
+        values = snapshot.get(field) or {}
+        if not values:
+            continue
+        newest = max(d for _v, d in values.values())
+        cutoff = newest - timedelta(days=config.COMPANY_SNAPSHOT_MAX_AGE_DAYS)
+        fresh = {src: vd for src, vd in values.items() if vd[1] >= cutoff}
+        rendered = ", ".join(
+            f"{src} {_fmt(v)} ({d}{'' if src in fresh else ', застаріло — у звірку не йде'})"
+            for src, (v, d) in sorted(values.items())
+        )
+        lines.append(f"{title}: {rendered} → {_verdict_text(field, fresh)}")
+
+    nasdaq = {f: (snapshot.get(f) or {}).get("nasdaq_analyst") for f in ("rating_buy", "rating_hold", "rating_sell")}
+    if all(nasdaq.values()):
+        lines.append(
+            "Рекомендації (nasdaq): купувати {0}, тримати {1}, продавати {2}".format(
+                *(int(v[0]) for v in nasdaq.values())
+            )
+        )
+    low, high = (snapshot.get("target_low") or {}).get("nasdaq_analyst"), (snapshot.get("target_high") or {}).get("nasdaq_analyst")
+    if low and high:
+        lines.append(f"Діапазон цілей (nasdaq): {_fmt(low[0])} … {_fmt(high[0])}")
+    recommendation = (snapshot.get("recommendation") or {}).get("finviz")
+    if recommendation:
+        lines.append(f"Середня рекомендація (finviz, 1 купувати … 5 продавати): {recommendation[0]}")
+    for field, title in (("short_float_pct", "Short float, %"), ("insider_own_pct", "Частка інсайдерів, %")):
+        values = snapshot.get(field) or {}
+        if values:
+            lines.append(f"{title}: " + ", ".join(f"{src} {v}" for src, (v, _d) in sorted(values.items())))
+    return lines
+
+
 def collect_asset_factors(
     conn, asset_id: str, label: str, price_source: str, price_metric_id: str,
     checklist: Optional["Checklist"] = None,
+    ticker: Optional[str] = None,
 ) -> AssetFactors:
     """Усі чинники одного активу за його чек-листом.
 
@@ -310,6 +496,8 @@ def collect_asset_factors(
             factor.texts = _fetch_synthesis(conn, asset_id)
             if not factor.texts:
                 factor.missing_reason = "синтезу ціна/новини ще немає"
+        elif key.startswith("company:"):
+            factor.texts, factor.missing_reason = _company_factor(conn, key, ticker)
         elif key.startswith("asset:"):
             # Ціна іншого активу watchlist — через його ПОТОЧНЕ джерело
             # (воно автоматично перемикається), не через прибите в

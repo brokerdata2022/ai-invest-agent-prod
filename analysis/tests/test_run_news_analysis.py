@@ -5,6 +5,15 @@ from news_analysis.run_news_analysis import resolve_tracked_assets
 # common/watchlist_db.py:fetch_asset_ids(conn) і передає явно).
 _DEFAULTS = {"watchlist": ["btc", "xauusd"]}
 
+# `watchlist_assets.news_patterns` (2026-10-22, доти
+# config.WATCHLIST_MATCH_TERMS) — у тестах лише потрібні активи.
+_PATTERNS = {
+    "xauusd": (r"\bgold\b", r"\bbullion\b", r"\bxau\b"),
+    "brent_crude": (r"\bbrent\b", r"\bcrude\b", r"\boil price", r"\bopec\b", r"\bhormuz\b"),
+    "btc": (r"\bbitcoin\b", r"\bbtc\b"),
+    "skyd": (r"\bskydance\b", r"\bskyd\b"),
+}
+
 
 def test_explicit_overrides_default():
     result = resolve_tracked_assets("watchlist", ["AAPL", "NVDA"], default_tracked_assets=_DEFAULTS)
@@ -73,6 +82,7 @@ def test_geopolitical_without_match_stays_untagged():
         "geopolitical", None, ["AAPL"],
         default_tracked_assets={"watchlist": ["btc"], "general": ["btc"]},
         title="Voters head to the polls in tight parliamentary race",
+        patterns_by_asset=_PATTERNS,
     ) is None
 
 
@@ -83,6 +93,7 @@ def test_geopolitical_with_match_gets_only_matched_assets():
         "geopolitical", None, ["AAPL"],
         default_tracked_assets={"watchlist": ["btc"], "general": ["btc"]},
         title="Oil tanker reportedly attacked in Strait of Hormuz region",
+        patterns_by_asset=_PATTERNS,
     )
     assert result is not None
     assert "brent_crude" in result
@@ -96,8 +107,17 @@ def test_match_is_prefilter_not_assignment():
     ставить питання моделі, asset_id призначає DeepSeek."""
     from news_analysis.run_news_analysis import matched_watchlist_assets
     assert matched_watchlist_assets(
-        "Deadly gold mine air strikes highlight Egypt-Sudan border insecurity"
+        "Deadly gold mine air strikes highlight Egypt-Sudan border insecurity", _PATTERNS
     ) == ["xauusd"]
+
+
+def test_telegram_added_stock_is_found_in_headlines():
+    """Живий кейс 2026-10-22: акція SKYD, додана через Telegram, у
+    пошук по заголовках не потрапляла — терміни жили в config поіменно."""
+    from news_analysis.run_news_analysis import matched_watchlist_assets
+    assert matched_watchlist_assets(
+        "Skydance shares jump after streaming deal", _PATTERNS
+    ) == ["skyd"]
 
 
 def test_explicit_tracked_assets_still_wins_over_match():

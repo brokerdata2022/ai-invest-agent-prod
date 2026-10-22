@@ -1481,3 +1481,254 @@ CREATE TABLE IF NOT EXISTS asset_checklists (
     llm_call_id         BIGINT REFERENCES llm_call_log (id),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ============================================================
+-- 2026-10-22: ВЛАСТИВОСТІ АКТИВУ — У ТАБЛИЦІ, НЕ В КОДІ
+-- ============================================================
+-- ЧОМУ (живий кейс SKYD, рішення користувача 2026-10-22: "один
+-- список — усе від нього"). Тип активу й усе, що з нього випливає,
+-- були розкидані хардкодом по семи місцях: категорії макровпливу
+-- (`trading_list/categories.py`), тип для списку торгів
+-- (`run_trading_list.py:_WATCHLIST_CRYPTO/_FX` — усе інше ставало
+-- "товаром", тож акцію SKYD показано як товар), терміни пошуку в
+-- новинах і в питаннях (`config.WATCHLIST_MATCH_TERMS`,
+-- `ASSISTANT_ASSET_TERMS`), ланцюжки резервних джерел
+-- (`jobs.py:_FALLBACK_CHAINS`), допуск звірки, ціни для синтезу
+-- (`prices.py:ASSET_PRICE_SOURCES`). Доданий через Telegram актив не
+-- потрапляв у жоден із них і тихо працював на половину.
+--
+-- Тепер це ФАКТИ про актив у його рядку. Визначаються при
+-- `/watchlist_add` (тип — з Twelve Data `symbol_search`, де він уже
+-- є: SKYD → "Common Stock", XAU/USD → "Precious Metal") і далі
+-- читаються всіма споживачами звідси. Що з типу ВИПЛИВАЄ для аналізу
+-- (категорії макровпливу) — не тут, а в `config.ASSET_IMPACT_PROFILES`
+-- за класом: таблиця тримає, ЩО це за актив, аналіз вирішує, що це
+-- означає (правило 1).
+--
+--   asset_class     — stock | crypto | fx | commodity | index
+--                     (NULL = ще не визначено; видно в /watchlist_list)
+--   commodity_group — лише для commodity: metal | energy | agri | other
+--   company_name    — назва компанії (акції) чи інструмента
+--   cik             — SEC CIK (лише акції): звітність, 10-K/10-Q
+--   news_patterns   — регулярки для пошуку в RSS-корпусі (англійська,
+--                     нижній регістр) — ПРЕФІЛЬТР, актив ставить DeepSeek
+--   ask_patterns    — регулярки для розпізнавання активу в питанні
+--                     (українська + англійська)
+--   price_chain     — джерела ціни В ПОРЯДКУ ПРІОРИТЕТУ:
+--                     [{"source", "metric_id", "ticker"}]; metric_id —
+--                     саме той, ПІД ЯКИМ ряд лежить у raw_observations.
+--                     NULL = лише власне джерело рядка.
+ALTER TABLE watchlist_assets ADD COLUMN IF NOT EXISTS asset_class TEXT;
+ALTER TABLE watchlist_assets ADD COLUMN IF NOT EXISTS commodity_group TEXT;
+ALTER TABLE watchlist_assets ADD COLUMN IF NOT EXISTS company_name TEXT;
+ALTER TABLE watchlist_assets ADD COLUMN IF NOT EXISTS cik TEXT;
+ALTER TABLE watchlist_assets ADD COLUMN IF NOT EXISTS news_patterns TEXT[];
+ALTER TABLE watchlist_assets ADD COLUMN IF NOT EXISTS ask_patterns TEXT[];
+ALTER TABLE watchlist_assets ADD COLUMN IF NOT EXISTS price_chain JSONB;
+
+-- Початкові активи: значення, що доти жили в коді, переносяться
+-- ДОСЛІВНО (терміни — з config.WATCHLIST_MATCH_TERMS і
+-- ASSISTANT_ASSET_TERMS, ланцюжки — з jobs.py:_FALLBACK_CHAINS).
+-- `WHERE asset_class IS NULL` — повторний apply_schema.py не
+-- перетирає того, що змінено пізніше.
+--
+-- ⚠️ ОДНА СВІДОМА ЗМІНА в ланцюжках: кандидат Twelve Data для
+-- eurusd/usdjpy/xauusd мав metric_id 'eurusd', а адаптер пише ряд під
+-- 'eurusd_close'. Тобто свіжість і звірка шукали ряд, якого НЕ
+-- ІСНУЄ, — і резерв Twelve Data для валют за весь час жодного разу не
+-- брав участі ні у виборі джерела, ні в звірці (той самий клас тихих
+-- дефектів, що docs/decisions.md 2026-10-13). Тут — правильні id.
+UPDATE watchlist_assets SET
+    asset_class = 'commodity', commodity_group = 'metal', company_name = 'Gold',
+    news_patterns = ARRAY['\bgold\b', '\bbullion\b', '\bxau\b'],
+    ask_patterns = ARRAY['\bзолот\w*', '\bgold\b', '\bxau\b'],
+    price_chain = '[{"source": "yahoo_chart", "metric_id": "xauusd", "ticker": "GC=F"},
+                    {"source": "tradingeconomics", "metric_id": "xauusd", "ticker": "gold"},
+                    {"source": "twelvedata", "metric_id": "xauusd_close", "ticker": "XAU/USD"}]'
+WHERE asset_id = 'xauusd' AND asset_class IS NULL;
+
+UPDATE watchlist_assets SET
+    asset_class = 'commodity', commodity_group = 'metal', company_name = 'Silver',
+    news_patterns = ARRAY['\bsilver\b', '\bxag\b'],
+    ask_patterns = ARRAY['\bсріб\w*', '\bsilver\b', '\bxag\b'],
+    price_chain = '[{"source": "yahoo_chart", "metric_id": "xagusd", "ticker": "SI=F"}]'
+WHERE asset_id = 'xagusd' AND asset_class IS NULL;
+
+UPDATE watchlist_assets SET
+    asset_class = 'commodity', commodity_group = 'energy', company_name = 'WTI crude oil',
+    news_patterns = ARRAY['\bwti\b', '\bcrude\b', '\boil price', '\boil\b.*\b(price|supply|output|export)', '\bopec\b'],
+    ask_patterns = ARRAY['\bнафт\w*', '\bwti\b', '\bcrude\b', '\boil\b'],
+    price_chain = '[{"source": "yahoo_chart", "metric_id": "wti_crude", "ticker": "CL=F"},
+                    {"source": "tradingeconomics", "metric_id": "wti_crude", "ticker": "crude-oil"}]'
+WHERE asset_id = 'wti_crude' AND asset_class IS NULL;
+
+UPDATE watchlist_assets SET
+    asset_class = 'commodity', commodity_group = 'energy', company_name = 'Brent crude oil',
+    news_patterns = ARRAY['\bbrent\b', '\bcrude\b', '\boil price', '\bopec\b', '\bhormuz\b'],
+    ask_patterns = ARRAY['\bбрент\w*', '\bbrent\b'],
+    price_chain = '[{"source": "yahoo_chart", "metric_id": "brent_crude", "ticker": "BZ=F"},
+                    {"source": "tradingeconomics", "metric_id": "brent_crude", "ticker": "brent-crude-oil"}]'
+WHERE asset_id = 'brent_crude' AND asset_class IS NULL;
+
+UPDATE watchlist_assets SET
+    asset_class = 'commodity', commodity_group = 'energy', company_name = 'Natural gas (Henry Hub)',
+    news_patterns = ARRAY['natural gas', '\blng\b', 'henry hub', '\bgas price'],
+    ask_patterns = ARRAY['\bгаз[ауоіюе]?м?\b', 'природн\w+ газ', 'natural gas', '\blng\b'],
+    price_chain = '[{"source": "yahoo_chart", "metric_id": "natgas", "ticker": "NG=F"},
+                    {"source": "tradingeconomics", "metric_id": "natgas", "ticker": "natural-gas"}]'
+WHERE asset_id = 'natgas' AND asset_class IS NULL;
+
+UPDATE watchlist_assets SET
+    asset_class = 'commodity', commodity_group = 'agri', company_name = 'Coffee',
+    news_patterns = ARRAY['\bcoffee\b', '\barabica\b', '\brobusta\b'],
+    ask_patterns = ARRAY['\bкав[аиуоюі]\b', '\bcoffee\b', '\barabica\b', '\brobusta\b'],
+    price_chain = '[{"source": "yahoo_chart", "metric_id": "coffee", "ticker": "KC=F"},
+                    {"source": "tradingeconomics", "metric_id": "coffee", "ticker": "coffee"}]'
+WHERE asset_id = 'coffee' AND asset_class IS NULL;
+
+UPDATE watchlist_assets SET
+    asset_class = 'fx', company_name = 'EUR/USD',
+    news_patterns = ARRAY['eur/usd', '\beuro\b.*\bdollar\b', '\beuro\b.*\b(rise|fall|slip|gain)'],
+    ask_patterns = ARRAY['\bєвро\w*', 'eur/?usd', '\beuro\b'],
+    price_chain = '[{"source": "yahoo_chart", "metric_id": "eurusd", "ticker": "EURUSD=X"},
+                    {"source": "twelvedata", "metric_id": "eurusd_close", "ticker": "EUR/USD"}]'
+WHERE asset_id = 'eurusd' AND asset_class IS NULL;
+
+UPDATE watchlist_assets SET
+    asset_class = 'fx', company_name = 'USD/JPY',
+    news_patterns = ARRAY['usd/jpy', '\byen\b'],
+    ask_patterns = ARRAY['\bєн[аиуоюі]?\b', '\bйен\w*', 'usd/?jpy', '\byen\b'],
+    price_chain = '[{"source": "yahoo_chart", "metric_id": "usdjpy", "ticker": "JPY=X"},
+                    {"source": "twelvedata", "metric_id": "usdjpy_close", "ticker": "USD/JPY"}]'
+WHERE asset_id = 'usdjpy' AND asset_class IS NULL;
+
+-- Крипта: ціну збирає щогодинна `crypto_prices` (Binance), тож
+-- ланцюжка немає. ticker — символ Binance: доти seed-рядки мали NULL і
+-- символ брався з хардкоду адаптера, тепер щогодинна джоба бере його
+-- з рядка (той самий шлях, що для крипти з Telegram).
+UPDATE watchlist_assets SET
+    asset_class = 'crypto', company_name = 'Bitcoin', ticker = COALESCE(ticker, 'BTCUSDT'),
+    news_patterns = ARRAY['\bbitcoin\b', '\bbtc\b'],
+    ask_patterns = ARRAY['\bбіткоїн\w*', '\bбіткойн\w*', '\bbitcoin\b', '\bbtc\b']
+WHERE asset_id = 'btc' AND asset_class IS NULL;
+
+UPDATE watchlist_assets SET
+    asset_class = 'crypto', company_name = 'Ethereum', ticker = COALESCE(ticker, 'ETHUSDT'),
+    news_patterns = ARRAY['\bethereum\b', '\beth\b'],
+    ask_patterns = ARRAY['\bефір\w*', '\bетер\w*', '\bethereum\b', '\beth\b']
+WHERE asset_id = 'eth' AND asset_class IS NULL;
+
+UPDATE watchlist_assets SET
+    asset_class = 'crypto', company_name = 'Solana', ticker = COALESCE(ticker, 'SOLUSDT'),
+    news_patterns = ARRAY['\bsolana\b', '\bsol\b'],
+    ask_patterns = ARRAY['\bсолан\w*', '\bsolana\b', '\bsol\b']
+WHERE asset_id = 'sol' AND asset_class IS NULL;
+
+-- bnb — доданий через Telegram 2026-10-04 (до цієї зміни термінів не
+-- мав зовсім: ні в пошуку новин, ні в питаннях).
+UPDATE watchlist_assets SET
+    asset_class = 'crypto', company_name = 'BNB',
+    news_patterns = ARRAY['\bbnb\b', '\bbinance coin\b'],
+    ask_patterns = ARRAY['\bbnb\b', '\bбнб\b']
+WHERE asset_id = 'bnb' AND source = 'binance' AND asset_class IS NULL;
+
+-- Решта рядків, доданих через Telegram (SKYD тощо), заповнюється НЕ
+-- тут: тип треба ПЕРЕВІРИТИ в джерелі, а SQL цього не вміє —
+-- `data-ingestion/backfill_watchlist_profile.py` (разово) і далі
+-- `/watchlist_add` сам.
+
+-- ============================================================
+-- 2026-10-22: ДАНІ КОМПАНІЇ ПОНАД КВАРТАЛЬНУ ЗВІТНІСТЬ — для акцій
+-- списку обраних (пункт 1 плану сесії, живий кейс SKYD)
+-- ============================================================
+-- Між квартальними звітами з компанією відбувається головне: угоди,
+-- зміна керівництва, попередні результати (8-K), купівлі й продажі
+-- власних акцій директорами (Form 4). SKYD за останні подання: 34 8-K
+-- і 57 Form 4 проти трьох 10-Q — агент не бачив жодного.
+-- Обидві таблиці — сирі дані (правило 6): append-only, не прибираються.
+
+CREATE TABLE IF NOT EXISTS company_events (
+    accession    TEXT PRIMARY KEY,
+    ticker       TEXT NOT NULL,
+    cik          BIGINT NOT NULL,
+    form         TEXT NOT NULL,          -- 8-K | 8-K/A
+    filing_date  DATE NOT NULL,
+    items        TEXT[] NOT NULL DEFAULT '{}',  -- коди пунктів 8-K ("1.01", "5.02")
+    url          TEXT NOT NULL,
+    fetched_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    notified_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_company_events_ticker_date
+    ON company_events (ticker, filing_date DESC);
+
+CREATE TABLE IF NOT EXISTS insider_transactions (
+    accession          TEXT NOT NULL,
+    seq                INTEGER NOT NULL,   -- порядковий номер угоди в поданні
+    ticker             TEXT NOT NULL,
+    cik                BIGINT NOT NULL,
+    filing_date        DATE NOT NULL,
+    owner_name         TEXT NOT NULL,
+    owner_role         TEXT NOT NULL,
+    security           TEXT NOT NULL,
+    derivative         BOOLEAN NOT NULL,   -- опціон/варант/RSU, а не сама акція
+    transaction_date   DATE,
+    code               TEXT NOT NULL,      -- P купівля, S продаж, A грант, M опціон, F податок…
+    shares             NUMERIC,
+    price              NUMERIC,
+    acquired_disposed  TEXT NOT NULL,      -- A | D
+    owned_after        NUMERIC,
+    fetched_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (accession, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_insider_transactions_ticker_date
+    ON insider_transactions (ticker, transaction_date DESC);
+
+-- Консенсус аналітиків і free float — у raw_observations, з ТРЬОХ
+-- джерел для звірки (живий замір і розбіжності —
+-- data-ingestion/companies/analyst_adapters.py).
+INSERT INTO sources (name, category, source_type, notes) VALUES
+    ('nasdaq_analyst', 'companies', 'unofficial', 'Nasdaq API /api/analyst/{ticker}/targetprice — ціль аналітиків (середня/мін/макс) і розподіл buy/hold/sell. Без ключа, потрібні браузерні заголовки'),
+    ('finviz', 'companies', 'unofficial', 'Finviz, сторінка тикера (скрапінг) — ціль, рекомендація 1-5, free float, акції в обігу, частка інсайдерів, short float'),
+    ('stockanalysis', 'companies', 'unofficial', 'stockanalysis.com/stocks/{ticker}/statistics (скрапінг вбудованих даних) — ціль, кількість аналітиків, free float, акції в обігу')
+ON CONFLICT (name) DO NOTHING;
+
+-- 2026-10-22 (пункт 3 плану сесії): ЗВІТНІСТЬ ЗА ПОДІЄЮ EARNINGS.
+-- Доти фундаментал SEC збирався щонеділі, тексти звітів — щосуботи,
+-- тож у сезон звітів скринінг (85% ваги — квартальні дані) працював на
+-- даних до 7 днів давності. Тепер компанія, що відзвітувала
+-- (`earnings_calendar`), перевіряється щодня, доки її 10-Q/10-K не
+-- зʼявиться в SEC; тоді фундаментал забирається ДО ранкового скринінгу.
+-- Рядок тут — "по цьому звіту вже зроблено", щоб не перевіряти SEC
+-- повторно. status: refreshed (забрали) | no_filing (за вікно
+-- очікування подання так і не зʼявилось — видно, а не тиша).
+CREATE TABLE IF NOT EXISTS earnings_refresh_log (
+    ticker        TEXT NOT NULL,
+    report_date   DATE NOT NULL,
+    status        TEXT NOT NULL,
+    form          TEXT,
+    accession     TEXT,
+    filing_date   DATE,
+    checked_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (ticker, report_date)
+);
+
+-- 2026-10-22 (пункт 4 плану сесії): СПИСОК ДЛЯ ТОРГІВ — "чим торгувати
+-- сьогодні". Кожен рядок тепер несе РІВНІ (ціна, максимум/мінімум за
+-- ~місяць, звичайний денний розмах) і коротке "чому" — трейдеру
+-- потрібні саме вони, а не скор.
+ALTER TABLE trading_list ADD COLUMN IF NOT EXISTS levels JSONB;
+ALTER TABLE trading_list ADD COLUMN IF NOT EXISTS why TEXT;
+
+-- Кожен прогін, і ПОРОЖНІЙ теж. З фільтром "каталізатор сьогодні"
+-- порожній список — законна відповідь, а не збій; без цього рядка
+-- звіт показував би вчорашній список як сьогоднішній (бо порожній
+-- прогін нічого не вставляв у trading_list). rejected — скільки
+-- активів відсіяно за якою причиною (+ кілька прикладів).
+CREATE TABLE IF NOT EXISTS trading_list_runs (
+    run_at     TIMESTAMPTZ PRIMARY KEY DEFAULT now(),
+    horizon    TEXT NOT NULL,
+    evaluated  INTEGER NOT NULL,
+    passed     INTEGER NOT NULL,
+    rejected   JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+ALTER TABLE trading_list_runs ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;

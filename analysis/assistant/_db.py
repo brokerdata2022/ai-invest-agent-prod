@@ -183,6 +183,23 @@ def outcome_summary(conn, horizon_days: int) -> list[dict]:
 # ============================================================
 
 
+def asset_terms(conn) -> dict[str, tuple[str, ...]]:
+    """{asset_id: регулярки} для розпізнавання активу в питанні —
+    `watchlist_assets.ask_patterns` (2026-10-22; доти
+    `config.ASSISTANT_ASSET_TERMS` поіменно на 11 активів, і про актив
+    із Telegram агент у питанні не дізнавався)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT asset_id, ask_patterns
+            FROM watchlist_assets
+            WHERE enabled AND ask_patterns IS NOT NULL
+            ORDER BY asset_id
+            """
+        )
+        return {asset_id: tuple(patterns) for asset_id, patterns in cur.fetchall()}
+
+
 def watchlist_series(conn, asset_id: str) -> Optional[dict]:
     with conn.cursor() as cur:
         cur.execute(

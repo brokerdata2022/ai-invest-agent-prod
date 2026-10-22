@@ -41,7 +41,9 @@ def _dicts(cur) -> list[dict]:
 def _venue_for_trading_list(kind: str, source: str) -> str:
     """`trading_list` змішує класи: watchlist-активи лежать у БД, а
     символи з крипто-скринінгу — ні."""
-    if source == "crypto_screening":
+    # Новачок-крипта (`discovery`, у списку торгів з 2026-10-22) — той
+    # самий ф'ючерсний символ, що в крипто-скринінгу.
+    if source == "crypto_screening" or (source == "discovery" and kind == "crypto"):
         return VENUE_BINANCE_FUTURES
     if source == "screening" or kind == "stock":
         return VENUE_DB_STOCK

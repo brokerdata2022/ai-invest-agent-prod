@@ -40,7 +40,8 @@ def fetch_watchlist_assets(conn) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT asset_id, label, source, metric_id
+            SELECT asset_id, label, source, metric_id, ticker,
+                   asset_class, commodity_group, company_name, cik
             FROM watchlist_assets
             WHERE enabled
             ORDER BY asset_id
@@ -152,3 +153,60 @@ def fetch_latest_filing_insight(conn, ticker: str):
             return None
         columns = [c[0] for c in cur.description]
     return dict(zip(columns, row))
+
+
+def fetch_company_events(conn, ticker: str, days: int, limit: int) -> list[dict]:
+    """8-K за останні `days` днів, найновіші першими (`company_events`,
+    2026-10-22)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT filing_date, form, items, url
+            FROM company_events
+            WHERE ticker = %s AND filing_date >= current_date - %s::int
+            ORDER BY filing_date DESC
+            LIMIT %s
+            """,
+            (ticker.upper(), days, limit),
+        )
+        columns = [c[0] for c in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+def fetch_insider_transactions(conn, ticker: str, days: int) -> list[dict]:
+    """Угоди Form 4 за останні `days` днів, найновіші першими."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT transaction_date, filing_date, owner_name, owner_role, security,
+                   derivative, code, shares, price, acquired_disposed, owned_after
+            FROM insider_transactions
+            WHERE ticker = %s AND COALESCE(transaction_date, filing_date) >= current_date - %s::int
+            ORDER BY COALESCE(transaction_date, filing_date) DESC, accession, seq
+            """,
+            (ticker.upper(), days),
+        )
+        columns = [c[0] for c in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+def fetch_snapshot(conn, ticker: str, sources: tuple[str, ...], fields: tuple[str, ...]) -> dict:
+    """{поле: {джерело: (значення, дата)}} — ОСТАННІЙ знімок кожного
+    джерела по кожному полю (консенсус аналітиків, free float)."""
+    metric_ids = [f"{ticker.lower()}_{field}" for field in fields]
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (source, metric_id) source, metric_id, value, observed_at
+            FROM v_observations_latest_revision
+            WHERE source = ANY(%s) AND metric_id = ANY(%s)
+            ORDER BY source, metric_id, observed_at DESC
+            """,
+            (list(sources), metric_ids),
+        )
+        rows = cur.fetchall()
+    prefix = f"{ticker.lower()}_"
+    out: dict[str, dict] = {}
+    for source, metric_id, value, observed_at in rows:
+        out.setdefault(metric_id[len(prefix):], {})[source] = (value, observed_at)
+    return out

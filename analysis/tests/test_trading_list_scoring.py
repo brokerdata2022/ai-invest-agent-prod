@@ -18,9 +18,10 @@ import pytest
 
 import config
 from trading_list.categories import (
-    CATEGORY_TO_WATCHLIST_ASSETS,
     IMPACT_CATEGORIES,
     category_affects_stocks,
+    category_map,
+    native_categories,
     watchlist_assets_for_category,
 )
 from trading_list.scoring import (
@@ -58,24 +59,62 @@ def test_component_weights_sum_to_one():
     assert total == Decimal("1")
 
 
-def test_category_map_covers_only_known_categories():
-    assert set(CATEGORY_TO_WATCHLIST_ASSETS) <= set(IMPACT_CATEGORIES)
+# Список обраних у тестах — рядки `watchlist_assets` лише з тими
+# колонками, з яких виводяться категорії (2026-10-22: доти мапа стояла
+# поіменно на 11 asset_id).
+_WATCHLIST = [
+    {"asset_id": "xauusd", "asset_class": "commodity", "commodity_group": "metal"},
+    {"asset_id": "xagusd", "asset_class": "commodity", "commodity_group": "metal"},
+    {"asset_id": "wti_crude", "asset_class": "commodity", "commodity_group": "energy"},
+    {"asset_id": "coffee", "asset_class": "commodity", "commodity_group": "agri"},
+    {"asset_id": "eurusd", "asset_class": "fx", "commodity_group": None},
+    {"asset_id": "sol", "asset_class": "crypto", "commodity_group": None},
+    {"asset_id": "skyd", "asset_class": "stock", "commodity_group": None},
+    {"asset_id": "mystery", "asset_class": None, "commodity_group": None},
+]
+
+
+def test_impact_profiles_use_only_known_categories():
+    for key, profile in config.ASSET_IMPACT_PROFILES.items():
+        assert profile["native"] in IMPACT_CATEGORIES, key
+        assert set(profile["affected_by"]) <= set(IMPACT_CATEGORIES), key
+        # Власна категорія мусить і впливати — інакше напрямок активу
+        # нізвідки не прийде.
+        assert profile["native"] in profile["affected_by"], key
 
 
 def test_unknown_category_returns_empty_not_raises():
     """Перелік категорій може розширитись у промпті expectations/
     раніше, ніж тут — це не причина валити весь прогін списку."""
-    assert watchlist_assets_for_category("нова_категорія") == ()
+    assert watchlist_assets_for_category("нова_категорія", category_map(_WATCHLIST)) == ()
 
 
 def test_gold_category_maps_to_metals():
-    assert set(watchlist_assets_for_category("золото")) == {"xauusd", "xagusd"}
+    assert set(watchlist_assets_for_category("золото", category_map(_WATCHLIST))) == {"xauusd", "xagusd"}
 
 
-def test_currency_category_does_not_map_to_commodities():
-    assets = watchlist_assets_for_category("валюта")
+def test_currency_category_does_not_map_to_commodities_except_metals():
+    assets = watchlist_assets_for_category("валюта", category_map(_WATCHLIST))
     assert "wti_crude" not in assets
     assert "eurusd" in assets
+
+
+def test_telegram_added_stock_gets_macro_categories():
+    """Живий кейс SKYD (2026-10-22): акція з Telegram не потрапляла в
+    жодну категорію і не мала власного напрямку."""
+    mapping = category_map(_WATCHLIST)
+    assert "skyd" in watchlist_assets_for_category("акції", mapping)
+    assert native_categories(_WATCHLIST)["skyd"] == "акції"
+
+
+def test_asset_without_class_gets_no_category_instead_of_guess():
+    mapping = category_map(_WATCHLIST)
+    assert all("mystery" not in ids for ids in mapping.values())
+    assert "mystery" not in native_categories(_WATCHLIST)
+
+
+def test_agri_not_affected_by_economy():
+    assert "coffee" not in watchlist_assets_for_category("економіка", category_map(_WATCHLIST))
 
 
 def test_only_broad_categories_affect_stocks():
@@ -486,10 +525,11 @@ def test_native_category_direction_only_for_own_asset():
     не напрямок солани."""
     from trading_list.categories import is_native_category
 
-    assert is_native_category("sol", "крипта")
-    assert not is_native_category("sol", "ставка")
-    assert is_native_category("xauusd", "золото")
-    assert not is_native_category("xauusd", "економіка")
+    natives = native_categories(_WATCHLIST)
+    assert is_native_category("sol", "крипта", natives)
+    assert not is_native_category("sol", "ставка", natives)
+    assert is_native_category("xauusd", "золото", natives)
+    assert not is_native_category("xauusd", "економіка", natives)
 
 
 def test_native_category_for_stocks_is_equities():
@@ -564,3 +604,102 @@ def test_macro_damping_survives_hit_kind_rename():
     for kind in ("release_upcoming", "release_done", "forecast"):
         macro, _ = catalyst_score([CatalystHit(kind, config.CATALYST_WEIGHT_RELEASE_HIGH)])
         assert macro < own_news, f"{kind}: приглушення макро не застосувалось"
+
+
+# --- "чим торгувати сьогодні" (2026-10-22, пункт 4 плану сесії) ---
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from trading_list.scoring import (  # noqa: E402
+    REJECT_CONFLICTING,
+    REJECT_NO_CATALYST,
+    REJECT_NO_DIRECTION,
+    is_today_catalyst,
+    price_levels,
+    rejection_reason,
+    trading_direction,
+)
+
+NOW = datetime(2026, 10, 22, 9, 0, tzinfo=timezone.utc)
+
+
+def _hit(kind, direction="neutral", hours=0, weight="0.7"):
+    return CatalystHit(kind, D(weight), direction, f"{kind} текст", at=NOW + timedelta(hours=hours))
+
+
+def test_yesterday_news_counts_last_week_does_not():
+    assert is_today_catalyst(_hit("news", "up", hours=-20), "stock", NOW)
+    assert not is_today_catalyst(_hit("news", "up", hours=-24 * 7), "stock", NOW)
+
+
+def test_macro_release_is_own_catalyst_only_for_non_stocks():
+    """Для акції реліз однаковий у 215 тикерів і нічого не різнить."""
+    release = _hit("release_upcoming", hours=5)
+    assert is_today_catalyst(release, "fx", NOW)
+    assert not is_today_catalyst(release, "stock", NOW)
+    assert not is_today_catalyst(_hit("release_upcoming", hours=24 * 3), "fx", NOW)
+
+
+def test_earnings_window_from_yesterday_to_tomorrow():
+    assert is_today_catalyst(_hit("earnings", hours=-24), "stock", NOW)
+    assert is_today_catalyst(_hit("earnings", hours=24), "stock", NOW)
+    assert not is_today_catalyst(_hit("earnings", hours=24 * 4), "stock", NOW)
+
+
+def test_forecast_and_undated_hits_are_not_today():
+    assert not is_today_catalyst(_hit("forecast", "up"), "fx", NOW)
+    assert not is_today_catalyst(CatalystHit("news", D("0.7"), "up"), "stock", NOW)
+
+
+def test_anomaly_vs_trend_is_rejected_as_conflicting():
+    """Живий фідбек: "price_anomaly вгору, тренд вниз" трейдеру нічого
+    не дає — такий актив у список не потрапляє."""
+    today = [_hit("price_anomaly", "up")]
+    direction = trading_direction(today, "down")
+    assert direction == "conflicting"
+    assert rejection_reason(today, direction, D("0.9")) == REJECT_CONFLICTING
+
+
+def test_no_today_catalyst_is_rejected_even_with_strong_trend():
+    assert rejection_reason([], "up", D("0.9")) == REJECT_NO_CATALYST
+
+
+def test_neutral_event_needs_direction_from_trend():
+    today = [_hit("earnings")]
+    assert rejection_reason(today, trading_direction(today, "neutral"), D("0.9")) == REJECT_NO_DIRECTION
+    assert rejection_reason(today, trading_direction(today, "up"), D("0.9")) is None
+
+
+def test_old_hits_do_not_vote_on_direction():
+    """Тижнева новина "вниз" не робить суперечливим актив, у якого
+    сьогодні все однозначно — голосують лише сьогоднішні події."""
+    today = [_hit("news", "up", hours=-2)]
+    assert trading_direction(today, "up") == "up"
+
+
+def test_price_levels_from_closes():
+    closes = [D("100"), D("102"), D("101"), D("105"), D("104")]
+    levels = price_levels(closes)
+    assert levels["last"] == "104"
+    assert levels["high"] == "105" and levels["low"] == "100"
+    assert levels["to_high_pct"] == "+1.0"
+    assert levels["to_low_pct"] == "-3.8"
+    assert levels["daily_move_pct"] is not None
+
+
+def test_price_levels_without_closes_uses_last_price_or_none():
+    assert price_levels([], D("0.0123"))["last"] == "0.0123"
+    assert price_levels([]) is None
+
+
+def test_neutral_event_with_divergent_trend_has_no_direction():
+    """Живий прогін 2026-10-22: SOL проходив "вниз" із завтрашнім CPI
+    Японії й трендом "−6% коротке / +43% довге"."""
+    today = [_hit("release_upcoming", hours=6)]
+    assert trading_direction(today, "down", trend_is_consistent=False) == "unclear"
+    assert trading_direction(today, "down", trend_is_consistent=True) == "down"
+
+
+def test_directional_event_still_counts_with_divergent_trend():
+    today = [_hit("news", "down", hours=-3)]
+    assert trading_direction(today, "down", trend_is_consistent=False) == "down"

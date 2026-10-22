@@ -6,8 +6,6 @@ from news.queries import (
     GENERAL_TERMS_MOVEMENT,
     MAX_QUERY_LEN,
     STOCK_NAME_OVERRIDES,
-    WATCHLIST_ASSET_IDS,
-    WATCHLIST_TERMS,
     batch_ticker_names,
     build_general_queries,
     build_stocks_query,
@@ -15,30 +13,38 @@ from news.queries import (
 )
 
 
+_TERMS = {"xauusd": '"gold price"', "eurusd": '"EUR/USD"', "btc": "Bitcoin"}
+
+
 def test_build_watchlist_query_includes_every_asset_term():
-    query = build_watchlist_query()
-    for term in WATCHLIST_TERMS.values():
+    query = build_watchlist_query(_TERMS)
+    for term in _TERMS.values():
         assert term in query
 
 
 def test_build_watchlist_query_is_a_single_or_group():
-    query = build_watchlist_query()
+    query = build_watchlist_query(_TERMS)
     assert query.startswith("(")
     assert query.endswith(")")
     assert " OR " in query
 
 
-def test_watchlist_asset_ids_match_watchlist_terms_keys():
-    # Одне джерело істини для "що таке watchlist" — query і
-    # tracked_assets (analysis/news_analysis/) не повинні розійтись.
-    assert WATCHLIST_ASSET_IDS == list(WATCHLIST_TERMS)
-
-
 def test_build_watchlist_query_uses_explicit_terms_when_given():
     # 2026-10-03: run_collect_news.py передає живий словник з БД
-    # (common/watchlist_db.py:fetch_terms) замість статичного фолбеку.
+    # (common/watchlist_db.py:fetch_terms).
     query = build_watchlist_query({"gbpusd": '"GBP/USD"'})
     assert query == '("GBP/USD")'
+
+
+def test_build_watchlist_query_has_no_static_fallback():
+    # 2026-10-22: статичний словник термінів видалено — без живого
+    # списку запиту немає, а не "запит по старому хардкоду".
+    import pytest
+    import news.queries as queries
+
+    assert not hasattr(queries, "WATCHLIST_TERMS")
+    with pytest.raises(ValueError):
+        build_watchlist_query({})
 
 
 def test_build_stocks_query_uses_company_name_when_known():

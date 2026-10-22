@@ -32,8 +32,7 @@ sys.path.insert(0, _ANALYSIS_DIR)
 sys.path.insert(0, os.path.join(_ANALYSIS_DIR, "..", "data-ingestion"))
 
 from common.db import get_connection  # noqa: E402
-from common.watchlist_db import fetch_asset_ids  # noqa: E402
-from config import WATCHLIST_MATCH_TERMS  # noqa: E402
+from common.watchlist_db import fetch_asset_ids, fetch_patterns  # noqa: E402
 from llm_common import LlmError, log_llm_call, require_api_key  # noqa: E402
 from news_analysis._db import fetch_unanalyzed, save_analysis  # noqa: E402
 from news_analysis.relevance_filter import analyze_article, DeepSeekResponseError  # noqa: E402
@@ -42,10 +41,14 @@ from screening._results_db import fetch_latest_tickers  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-def matched_watchlist_assets(title: str) -> list[str]:
-    """ДЕТЕРМІНОВАНИЙ пошук watchlist-активів у заголовку статті
-    (`config.WATCHLIST_MATCH_TERMS` — там же повне обґрунтування й
-    живий замір).
+def matched_watchlist_assets(title: str, patterns_by_asset: dict[str, tuple[str, ...]]) -> list[str]:
+    """ДЕТЕРМІНОВАНИЙ пошук активів списку у заголовку статті.
+
+    `patterns_by_asset` — `watchlist_assets.news_patterns`
+    (`common/watchlist_db.py:fetch_patterns(conn, "news_patterns")`).
+    Доти — `config.WATCHLIST_MATCH_TERMS` на 11 asset_id (живий замір
+    і обґрунтування — docs/decisions.md 2026-10-12): актив із Telegram
+    у пошук не потрапляв ніколи (2026-10-22).
 
     Це ПРЕФІЛЬТР, не призначення активу: повертає, про які активи
     стаття МОЖЕ бути, щоб `relevance_filter.py` поставив це питання
@@ -55,7 +58,7 @@ def matched_watchlist_assets(title: str) -> list[str]:
     lowered = (title or "").lower()
     return [
         asset_id
-        for asset_id, patterns in WATCHLIST_MATCH_TERMS.items()
+        for asset_id, patterns in patterns_by_asset.items()
         if any(re.search(pattern, lowered) for pattern in patterns)
     ]
 
@@ -66,6 +69,7 @@ def resolve_tracked_assets(
     screening_tickers: Optional[list[str]] = None,
     default_tracked_assets: Optional[dict[str, list[str]]] = None,
     title: Optional[str] = None,
+    patterns_by_asset: Optional[dict[str, tuple[str, ...]]] = None,
 ) -> Optional[list[str]]:
     """Чиста функція вибору tracked_assets для однієї статті — явний
     --tracked-assets завжди виграє, інакше дефолт per stream
@@ -91,7 +95,7 @@ def resolve_tracked_assets(
         return explicit
     default = (default_tracked_assets or {}).get(article_stream)
     if default is None:
-        matched = matched_watchlist_assets(title or "")
+        matched = matched_watchlist_assets(title or "", patterns_by_asset or {})
         return matched or None
     if screening_tickers:
         return default + screening_tickers
@@ -142,6 +146,7 @@ def main() -> None:
         # стрічки про події, не про активи, і тегування там дало б
         # хибні привʼязки (стаття про вибори — не новина про EUR/USD).
         watchlist_assets = fetch_asset_ids(conn)
+        patterns_by_asset = fetch_patterns(conn, "news_patterns")
         default_tracked_assets = {
             "watchlist": watchlist_assets,
             "general": watchlist_assets,
@@ -156,6 +161,7 @@ def main() -> None:
                 article["stream"], explicit_tracked_assets, screening_tickers,
                 default_tracked_assets=default_tracked_assets,
                 title=article.get("title"),
+                patterns_by_asset=patterns_by_asset,
             )
             try:
                 result, prompt, llm = analyze_article(

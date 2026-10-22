@@ -189,7 +189,7 @@ def test_message_conflict_explained_not_just_flagged():
 
 def test_message_counts_assets_in_header():
     text = format_message([ROW, dict(ROW, id=2, asset_id="btc", label="BTC/USDT")])
-    assert "Активи для розгляду — 2" in text
+    assert "Активи для торгів сьогодні — 2" in text
 
 
 def test_message_falls_back_to_asset_id_without_label():
@@ -299,3 +299,32 @@ def test_conflict_names_metrics_not_generic_words():
     assert metric_label("unemployment_rate") in text
     assert metric_label("eurozone_hicp") in text
     assert "вийшлі дані" not in text
+
+
+# --- рівні й порожній прогін (2026-10-22, пункт 4 плану сесії) ---
+
+from trading_list_notify import format_empty, format_levels  # noqa: E402
+
+
+def test_levels_line_describes_range_and_usual_move():
+    line = format_levels('{"last": "4194.5", "high": "4300", "low": "4010", "days": 20, '
+                         '"to_high_pct": "+2.5", "to_low_pct": "-4.4", "daily_move_pct": "0.85"}')
+    assert "ціна 4,194.50" in line
+    assert "макс 20 дн 4,300.00 (+2.5%)" in line
+    assert "±0.85%" in line
+
+
+def test_levels_for_futures_without_closes_show_price_only():
+    assert "денних закриттів немає" in format_levels('{"last": "0.0123", "note": "денних закриттів немає"}')
+
+
+def test_empty_run_says_nothing_to_trade_and_why():
+    text = format_empty({
+        "evaluated": 240,
+        "rejected": {"немає каталізатора сьогодні": {"count": 230, "examples": ["AAPL", "btc"]},
+                     "сигнали суперечать": {"count": 10, "examples": ["xauusd"]}},
+    })
+    assert "немає" in text
+    assert "240" in text
+    assert "немає каталізатора сьогодні: 230" in text
+    assert "xauusd" in text

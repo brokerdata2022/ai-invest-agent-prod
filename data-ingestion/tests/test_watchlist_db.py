@@ -396,3 +396,92 @@ def test_set_enabled_returns_true_when_row_updated():
 def test_set_enabled_returns_false_when_asset_missing():
     conn = _FakeConn(rows=[])  # rowcount=0
     assert watchlist_db.set_enabled(conn, "unknown", False) is False
+
+
+# --- профіль активу (2026-10-22) ---
+
+def test_price_chain_reads_ordered_candidates_from_row():
+    """Замість `jobs.py:_FALLBACK_CHAINS`: ланцюжок — у рядку активу."""
+    row = {
+        "asset_id": "eurusd", "source": "yahoo_chart", "metric_id": "eurusd", "ticker": "EURUSD=X",
+        "price_chain": [
+            {"source": "yahoo_chart", "metric_id": "eurusd", "ticker": "EURUSD=X"},
+            {"source": "twelvedata", "metric_id": "eurusd_close", "ticker": "EUR/USD"},
+        ],
+    }
+    assert watchlist_db.price_chain(row) == [
+        SourceCandidate("yahoo_chart", "eurusd", "EURUSD=X"),
+        # metric_id — той, ПІД ЯКИМ ряд лежить у БД ('_close'): доти
+        # тут стояло 'eurusd', і резерв Twelve Data ніколи не брав
+        # участі ні у звірці, ні у виборі джерела.
+        SourceCandidate("twelvedata", "eurusd_close", "EUR/USD"),
+    ]
+
+
+def test_price_chain_falls_back_to_row_source_when_empty():
+    row = {"asset_id": "btc", "source": "binance", "metric_id": "btc_close", "ticker": "BTCUSDT", "price_chain": None}
+    assert watchlist_db.price_chain(row) == [SourceCandidate("binance", "btc_close", "BTCUSDT")]
+
+
+def test_set_profile_writes_chain_as_jsonb_and_commits():
+    conn = _FakeConn(rows=[("x",)])
+    watchlist_db.set_profile(conn, "skyd", {
+        "asset_class": "stock",
+        "price_chain": [{"source": "twelvedata", "metric_id": "skyd_close", "ticker": "SKYD"}],
+    })
+    sql, params = conn.log[0]
+    assert "asset_class = %s" in sql
+    assert "price_chain = %s::jsonb" in sql
+    assert params[0] == "stock"
+    assert '"skyd_close"' in params[1]
+    assert params[-1] == "skyd"
+    assert conn.committed
+
+
+def test_set_profile_rejects_unknown_field():
+    """Тихо проігнорована колонка — рівно той клас дефектів, від якого
+    профіль і рятує."""
+    import pytest
+
+    with pytest.raises(ValueError, match="asset_type"):
+        watchlist_db.set_profile(_FakeConn(), "skyd", {"asset_type": "stock"})
+
+
+def test_fetch_patterns_maps_asset_to_regexes_and_skips_empty():
+    columns = [("asset_id",), ("news_patterns",)]
+    conn = _FakeConn(rows=[("skyd", [r"\bskydance\b"]), ("mystery", None)], columns=columns)
+    assert watchlist_db.fetch_patterns(conn, "news_patterns") == {"skyd": (r"\bskydance\b",)}
+
+
+# --- видалення = видалення (2026-10-22, пункт 2 плану сесії) ---
+
+def test_remove_asset_deletes_row_checklist_and_derived_analyses():
+    conn = _FakeConn(rows=[_XAUUSD_ROW])
+    removed = watchlist_db.remove_asset(conn, "xauusd")
+
+    statements = [sql for sql, _ in conn.log]
+    deleted = [s.split()[2] for s in statements if s.startswith("DELETE FROM")]
+    assert deleted == [
+        "asset_checklists", "fundamental_analysis", "news_synthesis",
+        "news_consolidated", "trading_list", "watchlist_assets",
+    ]
+    # Список торгів — лише рядки, що прийшли зі списку обраних
+    assert any("trading_list" in s and "source = 'watchlist'" in s for s in statements)
+    assert set(removed) == {"asset_checklists", "fundamental_analysis", "news_synthesis",
+                            "news_consolidated", "trading_list"}
+    assert conn.committed
+
+
+def test_remove_asset_never_touches_raw_data():
+    """Правило 6: сирі дані не видаляються ніколи — повернутий актив
+    одразу матиме історію."""
+    conn = _FakeConn(rows=[_XAUUSD_ROW])
+    watchlist_db.remove_asset(conn, "xauusd")
+    joined = " ".join(sql for sql, _ in conn.log)
+    for raw_table in ("raw_observations", "raw_news", "company_events", "insider_transactions",
+                      "company_filings", "earnings_calendar", "decision_outcomes"):
+        assert raw_table not in joined, raw_table
+
+
+def test_remove_asset_returns_none_when_missing():
+    assert watchlist_db.remove_asset(_FakeConn(rows=[]), "nope") is None

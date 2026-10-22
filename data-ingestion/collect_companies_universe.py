@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from collect_universe import fetch_sp500_constituents  # noqa: E402
 from common.db import get_connection, insert_observations  # noqa: E402
+from common.watchlist_db import fetch_stocks  # noqa: E402
 from companies.sec_edgar_adapter import SecEdgarAdapter  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -53,9 +54,22 @@ def main() -> None:
     constituents = fetch_sp500_constituents()
     if args.limit:
         constituents = constituents[: args.limit]
-    logger.info("Тикерів для збору: %d", len(constituents))
 
     conn = get_connection()
+    # + акції СПИСКУ ОБРАНИХ поза S&P 500 (2026-10-22, живий кейс SKYD):
+    # доти звітність збиралась лише для індексу, і акція, додана через
+    # Telegram, не мала її ніколи. CIK — з рядка активу; якщо його там
+    # немає, адаптер резолвить сам за тикером.
+    known = {c["symbol"].upper() for c in constituents}
+    extra = [
+        {"symbol": s["ticker"].upper(), "cik": s.get("cik")}
+        for s in fetch_stocks(conn) if s["ticker"].upper() not in known
+    ]
+    if extra:
+        logger.info("+ акції списку обраних поза S&P 500: %s", ", ".join(e["symbol"] for e in extra))
+    constituents = constituents + extra
+    logger.info("Тикерів для збору: %d", len(constituents))
+
     ok, failed = 0, []
     try:
         for i, c in enumerate(constituents, start=1):

@@ -195,6 +195,21 @@ def already_analyzed(conn, accession: str, ticker: str) -> bool:
         return cur.fetchone() is not None
 
 
+def watchlist_stock_tickers(conn) -> list[str]:
+    """Тикери акцій СПИСКУ ОБРАНИХ (2026-10-22): їхні звіти розбираються
+    завжди, а не лише коли тикер у топі скринінгу — інакше акція поза
+    S&P 500 (SKYD) тез зі звіту не мала б ніколи."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT upper(ticker) FROM watchlist_assets
+            WHERE enabled AND asset_class = 'stock' AND ticker IS NOT NULL
+            ORDER BY 1
+            """
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
 def resolve_cik(conn, ticker: str):
     """CIK із уже зібраного фундаменталу — другий мережевий лукап
     непотрібен.
@@ -203,7 +218,19 @@ def resolve_cik(conn, ticker: str):
     того поля в `raw_payload` немає (перевірено живим рядком), зате
     ПЕРШІ 10 ЦИФР номера подання — це і є CIK заявника. Формат
     `0000320193-25-000008` → CIK 320193. Це властивість самого формату
-    SEC, не наша евристика."""
+    SEC, не наша евристика.
+
+    Першим — CIK із рядка активу списку обраних (2026-10-22): він
+    відомий одразу після `/watchlist_add`, ще до першого збору
+    фундаменталу."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT cik FROM watchlist_assets WHERE upper(ticker) = %s AND cik IS NOT NULL LIMIT 1",
+            (ticker.upper(),),
+        )
+        row = cur.fetchone()
+    if row and row[0]:
+        return int(row[0])
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -247,7 +274,13 @@ def main() -> None:
     adapter = SecFilingsAdapter(user_agent=user_agent)
     conn = get_connection()
     try:
-        tickers = [args.ticker] if args.ticker else fetch_latest_tickers(conn)[: args.top]
+        if args.ticker:
+            tickers = [args.ticker]
+        else:
+            watchlist_stocks = watchlist_stock_tickers(conn)
+            tickers = watchlist_stocks + [
+                t for t in fetch_latest_tickers(conn)[: args.top] if t.upper() not in watchlist_stocks
+            ]
         if not tickers:
             logger.info("Немає тикерів (скринінг ще не прогонявся) — нічого робити")
             return

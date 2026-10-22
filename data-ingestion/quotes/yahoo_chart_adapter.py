@@ -75,8 +75,9 @@ CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 # заголовком (не потрібен headless-браузер): перевірено живо.
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ai-invest-agent/1.0)"}
 
-# internal metric_id → символ Yahoo. Тільки watchlist-активи: акції
-# йдуть через Twelve Data і сюди не переносяться.
+# internal metric_id → символ Yahoo для ПОЧАТКОВИХ активів і факторних
+# рядів. Нові активи списку обраних сюди НЕ дописуються: їхній символ
+# лежить у `watchlist_assets.price_chain` і передається як `symbol=`.
 #
 # Символи перевірені живим запитом 2026-10-12, усі віддали 200 і
 # осмислене значення. `JPY=X` — це саме USD/JPY (скільки єн за
@@ -129,14 +130,20 @@ def _range_for(limit: Optional[int]) -> str:
 class YahooChartAdapter(BaseAdapter):
     source = "yahoo_chart"
 
-    def __init__(self, metric_id: str, session: Optional[requests.Session] = None):
-        if metric_id not in SYMBOLS:
+    def __init__(
+        self, metric_id: str, symbol: Optional[str] = None, session: Optional[requests.Session] = None,
+    ):
+        # `symbol=` в обхід SYMBOLS (2026-10-22) — той самий принцип, що
+        # BinanceAdapter(symbol=...): актив, доданий через Telegram,
+        # приносить свій символ Yahoo у `watchlist_assets.price_chain`,
+        # і словник тут не треба правити на кожен новий актив.
+        if symbol is None and metric_id not in SYMBOLS:
             raise ValueError(
                 f"Немає символу Yahoo для metric_id {metric_id!r}. "
-                f"Доступні: {sorted(SYMBOLS)}"
+                f"Доступні: {sorted(SYMBOLS)} (або передайте symbol= явно)"
             )
         self.metric_id = metric_id
-        self.symbol = SYMBOLS[metric_id]
+        self.symbol = symbol or SYMBOLS[metric_id]
         self._session = session or requests.Session()
 
     def fetch(

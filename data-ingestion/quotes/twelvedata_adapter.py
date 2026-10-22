@@ -79,23 +79,59 @@ def search_symbol(query: str, api_key: str, session: Optional[requests.Session] 
     найкращий збіг (Twelve Data сам сортує за релевантністю) —
     викликач (validate_symbol у тому самому модулі чи інший) МАЄ ще
     підтвердити, що символ реально має дані, перш ніж довіряти йому."""
+    match = lookup_instrument(query, api_key, session=session)
+    if match is None:
+        return None
+    logger.info("Twelve Data symbol_search %r → %r (%s)", query, match["symbol"], match["instrument_name"])
+    return match["symbol"]
+
+
+def lookup_instrument(
+    query: str, api_key: Optional[str] = None, session: Optional[requests.Session] = None,
+) -> Optional[dict]:
+    """Перший збіг `symbol_search` як довідка про інструмент:
+    `{symbol, instrument_name, instrument_type, exchange, country}`,
+    або None.
+
+    Додано 2026-10-22 (живий кейс SKYD — акцію показано "товаром"):
+    тип інструмента в Twelve Data вже Є, і саме з нього `/watchlist_add`
+    тепер визначає клас активу (`common/asset_profile.py:classify_instrument`).
+    Живо: SKYD → "Skydance Corporation Class B Common Stock" / "Common
+    Stock" / NYSE; XAU/USD → "Precious Metal" / COMMODITY; GBP/USD →
+    "Physical Currency". `symbol_search` працює й без ключа — не
+    витрачає кредитів.
+
+    Точний збіг символу має пріоритет над першим рядком: пошук "NG"
+    дає першою National Grid (LSE), і без цього правила збіг за
+    назвою переміг би той символ, який користувач набрав дослівно."""
     session = session or requests.Session()
+    params = {"symbol": query}
+    if api_key:
+        params["apikey"] = api_key
     try:
-        response = session.get(
-            SYMBOL_SEARCH_URL, params={"symbol": query, "apikey": api_key}, timeout=15,
-        )
+        response = session.get(SYMBOL_SEARCH_URL, params=params, timeout=15)
         response.raise_for_status()
         data = response.json()
-    except requests.exceptions.RequestException:
+    except (requests.exceptions.RequestException, ValueError):
         logger.warning("Twelve Data symbol_search провалився для %r", query, exc_info=True)
         return None
 
     matches = data.get("data") if isinstance(data, dict) else None
     if not matches:
         return None
-    symbol = matches[0].get("symbol")
-    logger.info("Twelve Data symbol_search %r → %r (%s)", query, symbol, matches[0].get("instrument_name"))
-    return symbol
+    wanted = query.strip().upper()
+    exact = [m for m in matches if str(m.get("symbol", "")).upper() == wanted]
+    # Серед точних — спершу США: той самий тикер на BMV/LSE часто інший
+    # інструмент або дубль без звітності SEC.
+    exact.sort(key=lambda m: m.get("country") != "United States")
+    best = (exact or matches)[0]
+    return {
+        "symbol": best.get("symbol"),
+        "instrument_name": best.get("instrument_name"),
+        "instrument_type": best.get("instrument_type"),
+        "exchange": best.get("exchange"),
+        "country": best.get("country"),
+    }
 
 
 class TwelveDataAdapter(BaseAdapter):

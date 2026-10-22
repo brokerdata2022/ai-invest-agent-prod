@@ -101,48 +101,27 @@ from config import (
 # число на день без цього внутрішнього дрейфу. Стара twelvedata-
 # історія (metric_id="xauusd_close") лишається назавжди (rule 6).
 #
-# btc/eth/sol — crypto/binance_adapter.py (metric_id=f"{id}_close",
-# source="binance"), той самий ключ, що WATCHLIST_ASSET_IDS
-# (news/queries.py). xagusd — Twelve Data XAG/USD вимагає платний план
-# (docs/decisions.md 2026-09-26), тому НЕ twelvedata: ціна йде через
-# crypto/coingecko_adapter.py (kinesis-silver, токен-проксі 1:1 до
-# фізичного срібла, metric_id="xagusd_close", source="coingecko") —
-# той самий адаптер, що й market cap крипти нижче.
-#
-# btc/eth/sol/xagusd додані 2026-10-02: до цього _resolve_price_source()
-# для них помилково гадав twelvedata-конвенцію (fallback нижче), де
-# даних для жодного з них ніколи не було, тому fetch_price_change()
-# завжди повертав None — синтез (synthesize.py) ЦІЛКОМ пропускав усі
-# чотири активи watchlist, хоча ціна насправді вже збиралась.
-ASSET_PRICE_SOURCES: dict[str, tuple[str, str]] = {
-    "xauusd": ("tradingeconomics", "xauusd"),
-    "xagusd": ("coingecko", "xagusd_close"),
-    "wti_crude": ("tradingeconomics", "wti_crude"),
-    "brent_crude": ("tradingeconomics", "brent_crude"),
-    "eurusd": ("twelvedata", "eurusd_close"),
-    "coffee": ("tradingeconomics", "coffee"),
-    "natgas": ("tradingeconomics", "natgas"),
-    "usdjpy": ("twelvedata", "usdjpy_close"),
-    "btc": ("binance", "btc_close"),
-    "eth": ("binance", "eth_close"),
-    "sol": ("binance", "sol_close"),
-}
+# Джерело ціни кожного активу — ЛИШЕ з живого списку
+# (`common/watchlist_db.py:fetch_price_sources(conn)`). Хардкод
+# `ASSET_PRICE_SOURCES` видалено 2026-10-22: він двічі розходився з
+# таблицею тихо — 2026-10-02 (btc/eth/sol/xagusd читались не з того
+# джерела, синтез їх пропускав) і 2026-10-13 (`fetch_price_history` на
+# хардкоді читала ряд із 6 точками, і детектор аномалій ЗАВЖДИ казав
+# False). Тепер `price_sources` обовʼязковий — забути передати його
+# неможливо.
 
 
-def _resolve_price_source(asset_id: str, price_sources: dict[str, tuple[str, str]] = None) -> tuple[str, str]:
-    """Для watchlist-товарів/форексу — явний мапінг (`price_sources`,
-    None=дефолт падає на ASSET_PRICE_SOURCES нижче — викликач, що хоче
-    ЖИВИЙ, редагований через Telegram список, передає
-    `common/watchlist_db.py:fetch_price_sources(conn)` явно, 2026-10-03,
-    docs/decisions.md). Для БУДЬ-ЯКОГО іншого asset_id (тикери акцій зі
+def _resolve_price_source(asset_id: str, price_sources: dict[str, tuple[str, str]]) -> tuple[str, str]:
+    """Для активу списку обраних — його джерело з `price_sources`
+    (`common/watchlist_db.py:fetch_price_sources(conn)`). Для
+    БУДЬ-ЯКОГО іншого asset_id (тикери акцій зі
     скринінгу, docs/decisions.md "Ціль 2") — здогад за конвенцією,
     якою quotes/twelvedata_adapter.py сам будує metric_id
     (`f"{ticker.lower()}_close"`). Безпечно: якщо здогад хибний (актив
     насправді з іншого джерела, напр. крипта) — просто не знайдеться
     жодного спостереження, fetch_price_change() поверне None, як і
     раніше."""
-    effective_sources = price_sources if price_sources is not None else ASSET_PRICE_SOURCES
-    mapping = effective_sources.get(asset_id)
+    mapping = price_sources.get(asset_id)
     if mapping is not None:
         return mapping
     return ("twelvedata", f"{asset_id.lower()}_close")
@@ -177,11 +156,11 @@ def compute_pct_change(
 
 
 def fetch_price_change(
-    conn, asset_id: str, days: int = 7, price_sources: dict[str, tuple[str, str]] = None
+    conn, asset_id: str, days: int = 7, *, price_sources: dict[str, tuple[str, str]]
 ) -> Optional[PriceChange]:
     """Перше й останнє значення (v_observations_latest_revision) за
     останні `days` днів для asset_id — None, якщо немає даних у вікні
-    (для watchlist-товарів/форексу — price_sources/ASSET_PRICE_SOURCES;
+    (для активів списку обраних — price_sources;
     для інших asset_id, напр. тикерів акцій — здогад
     _resolve_price_source(), теж природно дає None за відсутності
     даних), І None, якщо найновіша точка сама застаріла
@@ -219,7 +198,7 @@ def fetch_price_change(
 
 
 def fetch_all_price_changes(
-    conn, asset_ids: list[str], days: int = 7, price_sources: dict[str, tuple[str, str]] = None
+    conn, asset_ids: list[str], days: int = 7, *, price_sources: dict[str, tuple[str, str]]
 ) -> dict[str, PriceChange]:
     """Те саме для списку активів одразу — пропускає ті, для яких
     немає джерела чи даних (не помилка, просто немає числового
@@ -232,7 +211,7 @@ def fetch_all_price_changes(
     return result
 
 
-def fetch_latest_observed_at(conn, asset_id: str, price_sources: dict[str, tuple[str, str]] = None):
+def fetch_latest_observed_at(conn, asset_id: str, *, price_sources: dict[str, tuple[str, str]]):
     """Дата НАЙСВІЖІШОГО спостереження для asset_id, БЕЗ обмеження
     вікном `days` (на відміну від fetch_price_change) — або None, якщо
     для цього джерела взагалі ще ніколи нічого не збирали.
@@ -262,7 +241,8 @@ def fetch_price_history(
     conn,
     asset_id: str,
     limit: int = ANOMALY_HISTORY_LOOKBACK,
-    price_sources: dict[str, tuple[str, str]] = None,
+    *,
+    price_sources: dict[str, tuple[str, str]],
 ) -> list[Decimal]:
     """Останні `limit` значень asset_id у ХРОНОЛОГІЧНОМУ порядку
     (найстаріше перше) — вхід для is_anomalous_move(). Перевикористовує

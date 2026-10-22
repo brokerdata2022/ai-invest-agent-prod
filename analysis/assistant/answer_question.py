@@ -107,7 +107,7 @@ def format_reply(data: dict) -> str:
 
 def build_context(conn, question: str) -> tuple:
     """(текст контексту, що розпізнали) — чиста проводка над `_db`."""
-    assets = resolve.resolve_assets(question, config.ASSISTANT_ASSET_TERMS, config.ASSISTANT_MAX_ASSETS)
+    assets = resolve.resolve_assets(question, _db.asset_terms(conn), config.ASSISTANT_MAX_ASSETS)
     tickers = resolve.resolve_tickers(question, _db.known_tickers(conn), config.ASSISTANT_MAX_ASSETS)
 
     blocks = [ctx.general_block(
