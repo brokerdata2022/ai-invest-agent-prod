@@ -165,3 +165,54 @@ def test_blocked_send_makes_no_http_call(monkeypatch):
 
     assert result == {"ok": False, "skipped_env": "dev"}
     assert called == []
+
+
+# --- довгі повідомлення й токен у помилці (2026-10-22, живий збій
+# notify_fundamental на продакшені) ---
+
+import pytest  # noqa: E402
+
+
+def test_long_message_is_split_by_lines_and_sent_in_parts(monkeypatch):
+    monkeypatch.delenv("AGENT_ENV", raising=False)
+    sent = []
+    monkeypatch.setattr(
+        telegram_client.requests, "post",
+        lambda url, data, timeout: sent.append(data["text"]) or _FakeResponse({"ok": True}),
+    )
+    text = "\n".join(f"<b>рядок {i}</b> " + "х" * 90 for i in range(100))  # ~10 000 символів
+    telegram_client.send_telegram_message("TOKEN", "CHAT", text, parse_mode="HTML")
+
+    assert len(sent) >= 3
+    assert all(len(part) <= telegram_client.TELEGRAM_MAX_CHARS for part in sent)
+    # Межа — по рядку: жоден тег не розірваний
+    assert all(part.count("<b>") == part.count("</b>") for part in sent)
+    assert "\n".join(sent) == text
+
+
+def test_single_huge_line_is_split_on_spaces():
+    parts = telegram_client.split_message(("слово " * 2000).strip(), limit=1000)
+    assert all(len(p) <= 1000 for p in parts)
+    assert " ".join(parts).split() == ("слово " * 2000).split()
+
+
+def test_short_message_is_not_split():
+    assert telegram_client.split_message("коротко") == ["коротко"]
+
+
+class _ErrorResponse:
+    status_code = 400
+
+    def json(self):
+        return {"ok": False, "description": "Bad Request: message is too long"}
+
+
+def test_error_carries_telegram_reason_but_never_the_token(monkeypatch):
+    """Доти помилка містила URL запиту — тобто токен бота — і він
+    потрапляв у логи й алерти."""
+    monkeypatch.delenv("AGENT_ENV", raising=False)
+    monkeypatch.setattr(telegram_client.requests, "post", lambda url, data, timeout: _ErrorResponse())
+    with pytest.raises(telegram_client.TelegramError) as error:
+        telegram_client.send_telegram_message("SECRET-TOKEN-123", "CHAT", "hello")
+    assert "message is too long" in str(error.value)
+    assert "SECRET-TOKEN-123" not in str(error.value)

@@ -70,12 +70,73 @@ def send_telegram_message(token: str, chat_id: str, text: str, parse_mode: str |
         return {"ok": False, "skipped_env": blocked_env}
 
     url = TELEGRAM_API_BASE.format(token=token, method="sendMessage")
-    data = {"chat_id": chat_id, "text": text}
-    if parse_mode:
-        data["parse_mode"] = parse_mode
-    response = requests.post(url, data=data, timeout=15)
-    response.raise_for_status()
-    return response.json()
+    result: dict = {}
+    for chunk in split_message(text):
+        data = {"chat_id": chat_id, "text": chunk}
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+        response = requests.post(url, data=data, timeout=15)
+        _raise_without_token(response)
+        result = response.json()
+    return result
+
+
+# Ліміт Telegram — 4096 символів на повідомлення; запас на підрахунок
+# після розбору HTML-сутностей.
+TELEGRAM_MAX_CHARS = 4000
+
+
+class TelegramError(RuntimeError):
+    """Відмова Telegram API — з поясненням від Telegram і БЕЗ токена."""
+
+
+def _raise_without_token(response) -> None:
+    """Замість `raise_for_status()` (2026-10-22, живий випадок на
+    продакшені): той клав у текст помилки URL запиту, а в URL — ТОКЕН
+    бота, і трасування з токеном ішли в логи й в алерти. До того ж
+    "400 Bad Request" не казав, ЩО не так; Telegram пояснює це в тілі
+    (`description`: "message is too long", "can't parse entities")."""
+    status = getattr(response, "status_code", 200)
+    if status < 400:
+        return
+    try:
+        description = response.json().get("description", "")
+    except ValueError:
+        description = (getattr(response, "text", "") or "")[:200]
+    raise TelegramError(f"Telegram API {status}: {description}")
+
+
+def split_message(text: str, limit: int = TELEGRAM_MAX_CHARS) -> list[str]:
+    """Довге повідомлення → частини до `limit`, по межах РЯДКІВ.
+
+    Навіщо (2026-10-22, живий збій notify_fundamental на продакшені):
+    розбір активу за чинниками з блоком компанії перевищив 4096
+    символів, Telegram відповів 400, і через одне повідомлення не
+    надсилалось жодне наступне — щодня знову. Ділимо по рядках, бо
+    HTML-теги наших звітів не переносяться через рядок; рядок, довший
+    за ліміт (суцільний абзац), ділиться по пробілу."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            cut = line.rfind(" ", 0, limit)
+            cut = cut if cut > 0 else limit
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:cut])
+            line = line[cut:].lstrip()
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def get_updates(token: str, offset: int | None = None, timeout: int = 0) -> list[dict]:
@@ -88,7 +149,7 @@ def get_updates(token: str, offset: int | None = None, timeout: int = 0) -> list
     if offset is not None:
         params["offset"] = offset
     response = requests.get(url, params=params, timeout=timeout + 10)
-    response.raise_for_status()
+    _raise_without_token(response)
     return response.json().get("result", [])
 
 
@@ -100,5 +161,5 @@ def set_my_commands(token: str, commands: list[dict]) -> dict:
     змінюється рідко (новий job)."""
     url = TELEGRAM_API_BASE.format(token=token, method="setMyCommands")
     response = requests.post(url, json={"commands": commands}, timeout=15)
-    response.raise_for_status()
+    _raise_without_token(response)
     return response.json()
