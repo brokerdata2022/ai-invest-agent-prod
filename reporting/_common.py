@@ -133,6 +133,8 @@ _NOTIFIABLE_TABLES = frozenset({
     # Додані 2026-10-13: синтез рішення по ставці (останній
     # незакритий пункт плану) і тези з тексту звітів 10-K/10-Q.
     "policy_rate_synthesis", "filing_insights",
+    # 2026-10-24: фінальний вердикт фундаменталу і підсумок вихідних.
+    "fundamental_verdict", "weekend_wrap",
 })
 
 

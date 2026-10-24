@@ -10,7 +10,7 @@
 
 import pytest
 
-from anthropic_client import AnthropicError, call_anthropic
+from anthropic_client import AnthropicError, call_anthropic, call_anthropic_batch
 
 
 class _Block:
@@ -112,3 +112,122 @@ def test_no_text_blocks_raises_with_hint():
 def test_thinking_blocks_are_not_mistaken_for_answer():
     client = _FakeClient(_Response([_Block("роздуми", type="thinking"), _Block('{"ok": true}')]))
     assert call_anthropic("prompt", api_key="k", client=client) == '{"ok": true}'
+
+
+# ============================================================
+# Розмірковування як налаштування (2026-10-24)
+# ============================================================
+
+
+def test_thinking_not_sent_by_default():
+    """Дефолт `thinking=None` — поле не передається, модель думає за
+    своїм дефолтом, як і до появи налаштування (поведінка не змінилась)."""
+    client = _FakeClient(_Response([_Block("{}")]))
+    call_anthropic("prompt", api_key="k", effort="medium", client=client)
+    assert "thinking" not in client.messages.last_request
+
+
+@pytest.mark.parametrize("mode", ["adaptive", "disabled"])
+def test_thinking_mode_is_passed_explicitly(mode):
+    client = _FakeClient(_Response([_Block("{}")]))
+    call_anthropic("prompt", api_key="k", thinking=mode, client=client)
+    assert client.messages.last_request["thinking"] == {"type": mode}
+
+
+# ============================================================
+# Message Batches API (filing_insight, 2026-10-24)
+# ============================================================
+
+
+class _Batch:
+    def __init__(self, status):
+        self.id = "msgbatch_1"
+        self.processing_status = status
+
+
+class _Result:
+    def __init__(self, type, message=None):
+        self.type = type
+        self.message = message
+
+
+class _Entry:
+    def __init__(self, custom_id, result):
+        self.custom_id = custom_id
+        self.result = result
+
+
+class _FakeBatches:
+    def __init__(self, statuses, entries):
+        self._statuses = list(statuses)
+        self._entries = entries
+        self.created = None
+        self.cancelled = False
+
+    def create(self, requests):
+        self.created = requests
+        return _Batch(self._statuses.pop(0))
+
+    def retrieve(self, batch_id):
+        return _Batch(self._statuses.pop(0) if self._statuses else "ended")
+
+    def results(self, batch_id):
+        return iter(self._entries)
+
+    def cancel(self, batch_id):
+        self.cancelled = True
+
+
+class _BatchClient:
+    def __init__(self, batches):
+        self.messages = type("M", (), {"batches": batches})()
+
+
+def test_batch_maps_results_back_to_caller_keys():
+    """custom_id в API — порядкові номери (тикер із крапкою чи двокрапкою
+    був би недопустимим), а викликач отримує свої ключі назад."""
+    batches = _FakeBatches(
+        ["in_progress", "ended"],
+        [
+            _Entry("r1", _Result("succeeded", _Response([_Block('{"b": 2}')]))),
+            _Entry("r0", _Result("succeeded", _Response([_Block('{"a": 1}')]))),
+        ],
+    )
+    out = call_anthropic_batch(
+        [("AAPL:0001", "p1"), ("BRK.B:0002", "p2")], api_key="k",
+        effort="medium", thinking="disabled", client=_BatchClient(batches), sleep=lambda s: None,
+    )
+    assert out == {"AAPL:0001": '{"a": 1}', "BRK.B:0002": '{"b": 2}'}
+    assert [r["custom_id"] for r in batches.created] == ["r0", "r1"]
+    # Налаштування глибини йдуть у кожен запит пакета так само, як у звичайний виклик.
+    params = batches.created[0]["params"]
+    assert params["output_config"] == {"effort": "medium"}
+    assert params["thinking"] == {"type": "disabled"}
+
+
+def test_batch_error_of_one_request_does_not_fail_others():
+    batches = _FakeBatches(
+        ["ended"],
+        [
+            _Entry("r0", _Result("succeeded", _Response([_Block("ok")]))),
+            _Entry("r1", _Result("errored")),
+        ],
+    )
+    out = call_anthropic_batch(
+        [("a", "p1"), ("b", "p2"), ("c", "p3")], api_key="k",
+        client=_BatchClient(batches), sleep=lambda s: None,
+    )
+    assert out["a"] == "ok"
+    assert isinstance(out["b"], AnthropicError)
+    # Запит без результату в пакеті — теж помилка, не тиша.
+    assert isinstance(out["c"], AnthropicError)
+
+
+def test_batch_timeout_cancels_and_raises():
+    batches = _FakeBatches(["in_progress"] * 10, [])
+    with pytest.raises(AnthropicError, match="не завершився"):
+        call_anthropic_batch(
+            [("a", "p")], api_key="k", poll_seconds=30, max_wait_seconds=60,
+            client=_BatchClient(batches), sleep=lambda s: None,
+        )
+    assert batches.cancelled

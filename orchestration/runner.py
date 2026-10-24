@@ -115,6 +115,31 @@ def _attempt_callable(spec: dict) -> tuple[bool, str, str]:
     return True, "", "OK\n"
 
 
+def run_scheduled(job_name: str, cfg: dict) -> bool:
+    """Запланований прогін: спершу календар ринків (`markets`/`session`/
+    `after_session` у записі `schedule.py`, 2026-10-24), потім
+    `run_job`. Пропуск через закритий ринок — успіх, а не провал: він
+    пишеться в лог джоби одним рядком (щоб "чому сьогодні тиша" було
+    видно), і Telegram-алерту немає.
+
+    Лише для РОЗКЛАДУ: ручний запуск (`run_job.py`, Telegram-команда)
+    іде прямо в `run_job` — людина, що просить зараз, отримує прогін і
+    в неділю."""
+    if any(key in cfg for key in ("markets", "session", "after_session")):
+        for path in (REPO_ROOT, REPO_ROOT / "data-ingestion"):
+            if str(path) not in sys.path:
+                sys.path.insert(0, str(path))
+        from common.market_hours import schedule_gate
+
+        reason = schedule_gate(cfg)
+        if reason:
+            logger.info("Джоба %s пропущена: %s", job_name, reason)
+            with _log_path(job_name).open("a", encoding="utf-8") as fh:
+                fh.write(f"{_run_header()}\nПРОПУЩЕНО: {reason}\n")
+            return True
+    return run_job(job_name)
+
+
 def run_job(job_name: str) -> bool:
     """Повертає True, якщо джоба виконалась успішно (subprocess exit 0
     або функція не кинула виняток) — за потреби з повторними спробами

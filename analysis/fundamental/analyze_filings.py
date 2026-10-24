@@ -44,7 +44,8 @@ from config import (  # noqa: E402
 )
 from llm_common import (  # noqa: E402
     LlmError,
-    call_llm,
+    LlmResponse,
+    call_llm_batch,
     log_llm_call,
     parse_json_object,
     require_api_key,
@@ -100,12 +101,8 @@ def build_prompt(filing, sections: dict) -> str:
     return "\n".join(lines)
 
 
-def extract_insight(filing: dict, sections: dict):
-    prompt = build_prompt(filing, sections)
-    # Порядок аргументів — (prompt, system_prompt, purpose), як у
-    # llm_common.call_llm; повертається LlmResponse, не кортеж.
-    llm = call_llm(prompt, SYSTEM_PROMPT, purpose=PURPOSE)
-    data = parse_json_object(llm.text, error_class=ValueError)
+def parse_insight(raw_text: str) -> dict:
+    data = parse_json_object(raw_text, error_class=ValueError)
 
     if "summary" not in data:
         raise ValueError(f"У відповіді LLM немає 'summary': {data!r}")
@@ -121,7 +118,34 @@ def extract_insight(filing: dict, sections: dict):
         "changes": as_list("changes"),
         "direction": data.get("direction"),
         "confidence": data.get("confidence"),
-    }, prompt, llm
+    }
+
+
+def extract_insights(pending: list[dict]) -> dict[str, object]:
+    """Витяг тез для всіх нових звітів ОДНИМ пакетом (2026-10-24):
+    маршрут `filing_insight` має `batch=True`, тож це Message Batches
+    API за половину ціни; якщо пакет не вдався — `call_llm_batch` сам
+    повторює звичайними викликами.
+
+    `pending` — [{"key", "row", "sections"}]. Повертає {key: (insight,
+    prompt, llm) або виняток}."""
+    prompts = {item["key"]: build_prompt(item["row"], item["sections"]) for item in pending}
+    responses = call_llm_batch(list(prompts.items()), SYSTEM_PROMPT, purpose=PURPOSE)
+
+    out: dict[str, object] = {}
+    for key, prompt in prompts.items():
+        llm = responses.get(key)
+        if not isinstance(llm, LlmResponse):
+            out[key] = llm or LlmError(f"{key}: немає відповіді")
+            continue
+        try:
+            out[key] = (parse_insight(llm.text), prompt, llm)
+        except ValueError as error:
+            # Аудит-лог і для збійної відповіді (rule 5) — викликач
+            # бачить prompt/llm у винятку.
+            error.prompt, error.llm = prompt, llm
+            out[key] = error
+    return out
 
 
 def save_filing(conn, filing) -> int:
@@ -287,6 +311,7 @@ def main() -> None:
         logger.info("Тикерів для розбору звітів: %d (%s)", len(tickers), ", ".join(tickers))
 
         collected = analyzed = 0
+        pending: list[dict] = []
         for ticker in tickers:
             cik = resolve_cik(conn, ticker)
             if cik is None:
@@ -316,21 +341,35 @@ def main() -> None:
                 if args.collect_only:
                     continue
 
-                row = {
-                    "ticker": ticker, "form": filing.form,
-                    "filing_date": filing.filing_date,
-                }
-                try:
-                    insight, prompt, llm = extract_insight(row, filing.sections)
-                except (LlmError, ValueError):
-                    logger.exception("%s: витяг тез провалився — пропущено", ticker)
-                    continue
+                pending.append({
+                    "key": f"{ticker}:{filing.accession}",
+                    "ticker": ticker,
+                    "filing_id": filing_id,
+                    "row": {
+                        "ticker": ticker, "form": filing.form,
+                        "filing_date": filing.filing_date,
+                    },
+                    "sections": filing.sections,
+                })
 
+        if pending:
+            logger.info("Витяг тез: %d звітів одним пакетом", len(pending))
+            outcomes = extract_insights(pending)
+            for item in pending:
+                ticker, outcome = item["ticker"], outcomes.get(item["key"])
+                if isinstance(outcome, ValueError) and getattr(outcome, "llm", None):
+                    log_llm_call(
+                        conn, llm=outcome.llm, purpose=PURPOSE, prompt=outcome.prompt,
+                        source_ref=item["key"],
+                    )
+                if not isinstance(outcome, tuple):
+                    logger.error("%s: витяг тез провалився — пропущено (%s)", ticker, outcome)
+                    continue
+                insight, prompt, llm = outcome
                 llm_call_id = log_llm_call(
-                    conn, llm=llm, purpose=PURPOSE, prompt=prompt,
-                    source_ref=f"{ticker}:{filing.accession}",
+                    conn, llm=llm, purpose=PURPOSE, prompt=prompt, source_ref=item["key"],
                 )
-                save_insight(conn, filing_id, ticker, insight, llm_call_id)
+                save_insight(conn, item["filing_id"], ticker, insight, llm_call_id)
                 analyzed += 1
                 logger.info(
                     "%s: тези — %s (напрямок %s): %s",

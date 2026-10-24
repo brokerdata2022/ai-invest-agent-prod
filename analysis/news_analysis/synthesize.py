@@ -79,7 +79,11 @@ from llm_common import (  # noqa: E402
     parse_json_object,
     require_api_key,
 )
-from common.watchlist_db import fetch_asset_ids, fetch_price_sources  # noqa: E402
+import change_gate  # noqa: E402
+from change_gate import Anchor  # noqa: E402
+from common import market_hours  # noqa: E402
+from common.watchlist_db import fetch_asset_ids, fetch_price_sources, fetch_watchlist  # noqa: E402
+from config import CHANGE_GATE_NEWS_PRICE_PP  # noqa: E402
 from news_analysis._db import fetch_relevant_for_aggregation, save_synthesis  # noqa: E402
 from news_analysis.aggregate import AssetSignal, aggregate_by_asset, cluster_articles  # noqa: E402
 from news_analysis.prices import (  # noqa: E402
@@ -229,12 +233,25 @@ def synthesize_asset(asset_id: str, signal: AssetSignal, price: PriceChange):
     return result, prompt, llm
 
 
+def gate_inputs(signal: AssetSignal, price: PriceChange) -> tuple[dict, dict]:
+    """Входи для гейту змін (2026-10-24): новини — дослівно (нова
+    історія = нові дані), рух ціни за вікно — з допуском у п.п.
+    (`config.CHANGE_GATE_NEWS_PRICE_PP`), бо вікно ковзає щодня."""
+    stable = {"cluster_count": signal.cluster_count, "summaries": sorted(signal.summaries)}
+    anchors = {"pct_change": Anchor(float(price.pct_change), CHANGE_GATE_NEWS_PRICE_PP, relative=False)}
+    return stable, anchors
+
+
 def main() -> None:
     load_dotenv()
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stream", choices=["watchlist", "general", "geopolitical"], default=None)
     parser.add_argument("--max-age-days", type=int, default=7)
+    parser.add_argument(
+        "--force", action="store_true",
+        help="синтезувати навіть без змін входів і на закритих ринках",
+    )
     args = parser.parse_args()
 
     require_api_key("news_price_synthesis")
@@ -263,9 +280,21 @@ def main() -> None:
             len(universe), len(watchlist_asset_ids), len(screening_tickers), len(signals),
         )
 
+        # Вихідні й свята (2026-10-24): синтез лише по активах, чий ринок
+        # сьогодні торгується. Субота 24.10 до цієї зміни: 12 синтезів
+        # по акціях, нафті, золоту й USD/JPY — і жодного по крипті.
+        classes = {row["asset_id"]: row.get("asset_class") for row in fetch_watchlist(conn)}
+        if not args.force:
+            closed = [a for a in universe if not market_hours.asset_is_open(a, classes)]
+            if closed:
+                logger.info(
+                    "Ринок закрито — пропущено %d активів: %s", len(closed), ", ".join(closed),
+                )
+            universe = [a for a in universe if a not in set(closed)]
+
         prices = fetch_all_price_changes(conn, universe, days=args.max_age_days, price_sources=price_sources)
 
-        synthesized = 0
+        synthesized = unchanged = 0
         for asset_id in universe:
             signal = signals.get(asset_id) or _empty_signal(asset_id)
             has_news = asset_id in signals
@@ -303,6 +332,13 @@ def main() -> None:
                     asset_id, price.pct_change,
                 )
 
+            stable, anchors = gate_inputs(signal, price)
+            decision = change_gate.check(conn, "news_price_synthesis", asset_id, stable, anchors)
+            if not decision.changed and not args.force:
+                logger.info("%s: %s (з %s) — синтез лишається чинним", asset_id, decision.reason, decision.since)
+                unchanged += 1
+                continue
+
             try:
                 result, prompt, llm = synthesize_asset(asset_id, signal, price)
             except SynthesisResponseError:
@@ -328,6 +364,7 @@ def main() -> None:
                 result=result,
                 llm_call_id=llm_call_id,
             )
+            change_gate.remember(conn, "news_price_synthesis", asset_id, stable, anchors)
             synthesized += 1
             logger.info(
                 "%s → direction=%s confidence=%.2f: %s",
@@ -336,7 +373,7 @@ def main() -> None:
     finally:
         conn.close()
 
-    logger.info("Готово: %d активів синтезовано", synthesized)
+    logger.info("Готово: %d активів синтезовано, %d без змін входів", synthesized, unchanged)
 
 
 if __name__ == "__main__":

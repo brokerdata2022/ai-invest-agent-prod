@@ -164,3 +164,17 @@ def test_identifiers_are_whitelisted(bad):
     ставати чимось гіршим за помилку."""
     with pytest.raises(ValueError):
         _safe_ident(bad)
+
+
+# --- поправка вікна на вихідні (2026-10-24) ---
+
+def test_calendar_check_window_grows_over_weekend():
+    from datetime import date
+
+    from output_health import effective_window_hours
+
+    check = {"window_hours": 36, "calendar": "stock"}
+    assert effective_window_hours(check, date(2026, 10, 23)) == 36   # п'ятниця
+    assert effective_window_hours(check, date(2026, 10, 25)) == 84   # неділя: +сб +нд
+    # Перевірка без календаря не змінюється ніколи.
+    assert effective_window_hours({"window_hours": 36}, date(2026, 10, 25)) == 36

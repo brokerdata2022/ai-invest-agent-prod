@@ -39,6 +39,7 @@ import logging
 import os
 import re
 import sys
+from datetime import date, timedelta
 
 from dotenv import load_dotenv
 
@@ -49,6 +50,7 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "data-ingestion"))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "reporting"))
 
+from common import market_hours  # noqa: E402
 from common.db import get_connection  # noqa: E402
 
 import config  # noqa: E402
@@ -78,13 +80,35 @@ def _safe_ident(name: str) -> str:
     return name
 
 
+def effective_window_hours(check: dict, today=None) -> int:
+    """Вікно перевірки з поправкою на вихідні й свята (2026-10-24).
+
+    Для виводів, що з'являються лише в торгові дні (`"calendar"` — клас
+    активів, напр. "stock": сесійні брифи, скринінг акцій), кожен
+    неторговий день серед останніх `OUTPUT_HEALTH_CALENDAR_LOOKBACK_DAYS`
+    додає добу до вікна. Інакше в неділю ввечері бриф п'ятниці (55 год
+    тому) читався б як "джоба перестала писати" — а вона просто не мала
+    чого писати."""
+    hours = int(check["window_hours"])
+    asset_class = check.get("calendar")
+    if not asset_class:
+        return hours
+    code = config.MARKET_HOLIDAY_CALENDARS.get(asset_class, "XNYS")
+    today = today or date.today()
+    closed = sum(
+        1 for back in range(config.OUTPUT_HEALTH_CALENDAR_LOOKBACK_DAYS)
+        if not market_hours.is_trading_day(code, today - timedelta(days=back))
+    )
+    return hours + 24 * closed
+
+
 def _window_clause(check: dict) -> str:
     """Подієві таблиці (`window_hours: None`) міряються цілком — вік
     рядків у них нічого не означає."""
     if check["window_hours"] is None:
         return ""
     column = _safe_ident(check["time_column"])
-    return f"WHERE {column} >= now() - interval '{int(check['window_hours'])} hours'"
+    return f"WHERE {column} >= now() - interval '{effective_window_hours(check)} hours'"
 
 
 def run_check(conn, check: dict) -> dict:

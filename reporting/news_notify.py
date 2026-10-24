@@ -47,7 +47,9 @@ from _common import (  # noqa: E402
     mark_notified,
     resolve_telegram_credentials,
 )
+from common import market_hours  # noqa: E402
 from common.db import get_connection  # noqa: E402
+from common.watchlist_db import fetch_watchlist  # noqa: E402
 from telegram_client import send_telegram_message  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -208,6 +210,17 @@ def batch_messages(rows: list[dict], max_chars: int = MAX_MESSAGE_CHARS) -> list
     return messages
 
 
+def drop_closed_markets(rows: list[dict], classes: dict[str, str], at=None) -> list[dict]:
+    """Вихідні й свята (2026-10-24): новини про актив, чий ринок закритий,
+    не йдуть зараз — вони лишаються ненадісланими й підуть, коли ринок
+    відкриється. Новини без активу (геополітика, загальний ринок) і
+    крипта — йдуть завжди: саме вони пояснюють геп у понеділок."""
+    return [
+        row for row in rows
+        if not row.get("asset_id") or market_hours.asset_is_open(row["asset_id"], classes, at)
+    ]
+
+
 def main() -> None:
     load_dotenv()
 
@@ -232,6 +245,16 @@ def main() -> None:
         else:
             rows = fetch_top_unnotified(
                 conn, stream=args.stream, min_confidence=args.min_confidence, limit=args.limit
+            )
+        # У будні фільтр нічого не відсіює — вибірка та сама, що й до
+        # 2026-10-24; у вихідні повідомлення просто коротше.
+        classes = {row["asset_id"]: row.get("asset_class") for row in fetch_watchlist(conn)}
+        before = len(rows)
+        rows = drop_closed_markets(rows, classes)
+        if len(rows) < before:
+            logger.info(
+                "Відкладено до відкриття ринку: %d новин про активи закритих ринків",
+                before - len(rows),
             )
         if not rows:
             logger.info("Нових важливих новин немає — сповіщення не надсилається")

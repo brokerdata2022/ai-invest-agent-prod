@@ -1732,3 +1732,56 @@ CREATE TABLE IF NOT EXISTS trading_list_runs (
     rejected   JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 ALTER TABLE trading_list_runs ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
+
+-- 2026-10-24 (рішення користувача: "скоротити Anthropic без втрати
+-- якості"): ГЕЙТ ЗМІН перед LLM-викликом (analysis/change_gate.py).
+-- Один рядок на (призначення, об'єкт): відбиток входів МИНУЛОГО
+-- успішного аналізу. stable-частина — хешем, щоденні числа (ціна,
+-- дохідність) — значеннями в anchors, бо їх порівнюють із допуском.
+CREATE TABLE IF NOT EXISTS llm_input_fingerprints (
+    purpose      TEXT NOT NULL,
+    source_ref   TEXT NOT NULL,
+    fingerprint  TEXT NOT NULL,
+    anchors      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (purpose, source_ref)
+);
+
+-- 2026-10-24: ФІНАЛЬНИЙ ВЕРДИКТ фундаменталу — один висновок Anthropic
+-- поверх аналізів кожного активу (їх тепер робить DeepSeek,
+-- fundamental_analysis). Один на день; asset_ids — які аналізи пішли
+-- у вхід (notify показує їх короткими рядками під вердиктом).
+CREATE TABLE IF NOT EXISTS fundamental_verdict (
+    id            BIGSERIAL PRIMARY KEY,
+    verdict_date  DATE NOT NULL,
+    summary       TEXT NOT NULL,
+    key_points    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    conflicts     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    watch         JSONB NOT NULL DEFAULT '[]'::jsonb,
+    analysis_ids  JSONB NOT NULL DEFAULT '[]'::jsonb,
+    llm_call_id   BIGINT REFERENCES llm_call_log (id),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    notified_at   TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fundamental_verdict_per_day
+    ON fundamental_verdict (verdict_date);
+
+-- 2026-10-24: ПІДСУМОК ВИХІДНИХ (analysis/news_analysis/weekend_wrap.py)
+-- — неділя ввечері перед Азією: що за вихідні може дати геп у понеділок.
+-- Замінює денні брифи, яких у вихідні більше немає.
+CREATE TABLE IF NOT EXISTS weekend_wrap (
+    id            BIGSERIAL PRIMARY KEY,
+    wrap_date     DATE NOT NULL,
+    summary       TEXT NOT NULL,
+    direction     TEXT NOT NULL,
+    confidence    NUMERIC NOT NULL,
+    gap_risks     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    crypto        TEXT,
+    watch_monday  JSONB NOT NULL DEFAULT '[]'::jsonb,
+    inputs        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    llm_call_id   BIGINT REFERENCES llm_call_log (id),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    notified_at   TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weekend_wrap_per_day
+    ON weekend_wrap (wrap_date);

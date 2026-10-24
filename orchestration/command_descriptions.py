@@ -38,6 +38,8 @@ JOB_DESCRIPTIONS: dict[str, str] = {
     "discover_candidates": "Пошук новачків: будь-який актив із рухом вгору або вниз",
     "notify_candidates": "Надіслати нових кандидатів-новачків",
     "daily_digest": "Щоденний дайджест найважливішого за добу",
+    "weekend_wrap": "Підсумок вихідних: що може дати геп у понеділок (ШІ)",
+    "notify_weekend_wrap": "Надіслати підсумок вихідних",
     "crypto_prices": "Зібрати ціни BTC/ETH/SOL (Binance+CoinGecko)",
     "crypto_derivatives_collect": "Зібрати дані ф'ючерсів (Binance+Bybit+OKX)",
     "crypto_screening_daily": "Крипто-скринінг LONG/SHORT/WATCH (денний скан)",
@@ -114,4 +116,5 @@ INFO_JOB_NAMES: frozenset[str] = frozenset({
     "notify_trading_list",
     "notify_fundamental",
     "notify_watchlist",
+    "notify_weekend_wrap",
 })

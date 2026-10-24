@@ -409,6 +409,10 @@ _DERIVED_BY_ASSET = (
     ("news_synthesis", "asset_id", None),
     ("news_consolidated", "asset_id", None),
     ("trading_list", "asset_id", "source = 'watchlist'"),
+    # Відбитки гейту змін (2026-10-24): інакше повернутий актив зустрів
+    # би старий відбиток, а його висновок уже видалено вище — і гейт
+    # сказав би "без змін" для аналізу, якого немає.
+    ("llm_input_fingerprints", "source_ref", None),
 )
 
 

@@ -43,6 +43,7 @@ import logging
 import os
 import sys
 from datetime import date
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -58,7 +59,9 @@ from config import (  # noqa: E402
     POLICY_SPEECH_DAYS_BACK,
     POLICY_SYNTHESIS_HORIZON_DAYS,
 )
-from config import FORECAST_YIELD_LONG, FORECAST_YIELD_SHORT  # noqa: E402
+from config import CHANGE_GATE_YIELD_PP, FORECAST_YIELD_LONG, FORECAST_YIELD_SHORT  # noqa: E402
+import change_gate  # noqa: E402
+from change_gate import Anchor  # noqa: E402
 from forecasting.market_context import build_snapshot, format_snapshot  # noqa: E402
 from llm_common import (  # noqa: E402
     LlmError,
@@ -181,7 +184,15 @@ def fetch_market_news(conn, limit: int = 8) -> list[dict]:
     return {"market": market, "stories": stories}
 
 
-def build_prompt(conn, bank: str, config_entry: dict) -> str:
+def build_prompt(conn, bank: str, config_entry: dict, gate: Optional[dict] = None) -> str:
+    """`gate` (2026-10-24) — якщо передано словник, у нього кладуться
+    входи для гейту змін (`analysis/change_gate.py`): `stable` — те, що
+    має збігатися дослівно (дані, прогнози, історії, виступи), `anchors`
+    — дохідності 2Y/10Y, що рухаються щодня й порівнюються з допуском.
+    Збираються тут же, з тих самих рядків, що йдуть у промпт — щоб гейт
+    і промпт не могли розійтись."""
+    stable: dict = {"bank": bank}
+    anchors: dict = {}
     lines = [
         f"Центральний банк: {config_entry['label']}",
     ]
@@ -192,7 +203,9 @@ def build_prompt(conn, bank: str, config_entry: dict) -> str:
         else "Найближче засідання: дата ще не заведена в календар"
     )
 
+    stable["meeting"] = str(meeting)
     current = fetch_metric_snapshot(conn, config_entry["rate_source"], config_entry["rate_metric"], 3)
+    stable["rate"] = [[str(r["observed_at"]), str(r["value"])] for r in current]
     if current:
         lines.append(
             "Поточна ставка: "
@@ -203,6 +216,9 @@ def build_prompt(conn, bank: str, config_entry: dict) -> str:
     lines.append("1. МАКРОДАНІ (вхід рішення):")
     for source, metric_id, label in config_entry["macro_inputs"]:
         points = fetch_metric_snapshot(conn, source, metric_id)
+        stable.setdefault("macro", {})[metric_id] = [
+            [str(r["observed_at"]), str(r["value"])] for r in points
+        ]
         if not points:
             lines.append(f"- {label}: даних немає")
             continue
@@ -217,6 +233,9 @@ def build_prompt(conn, bank: str, config_entry: dict) -> str:
         if forecast is None:
             continue
         any_forecast = True
+        stable.setdefault("forecasts", {})[metric_id] = [
+            str(forecast["forecast_value"]), str(forecast["direction"]),
+        ]
         lines.append(
             f"- {label}: {forecast['forecast_value']} "
             f"(напрямок {forecast['direction']}, упевненість {forecast['confidence']})"
@@ -232,14 +251,22 @@ def build_prompt(conn, bank: str, config_entry: dict) -> str:
         # щоб "спред 2s10s" означало те саме в обох місцях.
         short = _yield_series(conn, *FORECAST_YIELD_SHORT)
         long = _yield_series(conn, *FORECAST_YIELD_LONG)
-        snapshot = format_snapshot(build_snapshot(short, long, date.today()))
+        yields = build_snapshot(short, long, date.today())
+        snapshot = format_snapshot(yields)
         lines.append(snapshot or "- даних немає")
+        for name, value in (("2y", yields.short_value), ("10y", yields.long_value)):
+            if value is not None:
+                anchors[name] = Anchor(float(value), CHANGE_GATE_YIELD_PP, relative=False)
     except Exception:
         logger.warning("Контекст дохідностей недоступний", exc_info=True)
         lines.append("- даних немає")
     lines.append("")
 
     news = fetch_market_news(conn)
+    # Стан ринку — лише напрям: текст сесійного синтезу переписується
+    # тричі на добу іншими словами, і з ним гейт не закривався б ніколи.
+    stable["market"] = news["market"]["direction"] if news["market"] else None
+    stable["stories"] = sorted(story["summary"] for story in news["stories"])
     lines.append("4. РИНКОВИЙ КОНТЕКСТ:")
     if news["market"]:
         lines.append(
@@ -256,9 +283,11 @@ def build_prompt(conn, bank: str, config_entry: dict) -> str:
         conn, bank, POLICY_SPEECH_DAYS_BACK, POLICY_SPEECH_DAYS_AHEAD,
     )
     lines.append("5. ВИСТУПИ ЧЛЕНІВ КОМІТЕТУ:")
+    stable["speeches"] = []
     if speeches:
         for speech in speeches:
             when = "уже відбувся" if speech["scheduled_at"].date() <= date.today() else "запланований"
+            stable["speeches"].append([str(speech["scheduled_at"]), speech["title"], when])
             lines.append(
                 f"- {speech['scheduled_at']:%Y-%m-%d %H:%M} ({when}, "
                 f"вплив {speech['impact_level'] or 'н/д'}): {speech['title']}"
@@ -269,6 +298,8 @@ def build_prompt(conn, bank: str, config_entry: dict) -> str:
     lines.append(
         "Зваж усі п'ять входів і спрогнозуй РІШЕННЯ найближчого засідання."
     )
+    if gate is not None:
+        gate["stable"], gate["anchors"] = stable, anchors
     return "\n".join(lines)
 
 
@@ -335,6 +366,10 @@ def main() -> None:
         help="синтезувати лише банки, чиє засідання в межах цих днів",
     )
     parser.add_argument("--dry-run", action="store_true", help="показати промпт і вийти")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="синтезувати навіть без змін входів (оминути гейт змін)",
+    )
     args = parser.parse_args()
 
     if not args.dry_run:
@@ -358,10 +393,19 @@ def main() -> None:
                 )
                 continue
 
-            prompt = build_prompt(conn, bank, entry)
+            gate: dict = {}
+            prompt = build_prompt(conn, bank, entry, gate=gate)
+            source_ref = f"{bank}:{meeting:%Y-%m-%d}"
+            decision = change_gate.check(conn, PURPOSE, source_ref, gate["stable"], gate["anchors"])
             if args.dry_run:
-                print(f"\n===== {bank} =====\n{prompt}")
+                print(f"\n===== {bank} — гейт: {decision.reason} =====\n{prompt}")
                 continue
+            if not decision.changed and not args.force:
+                logger.info(
+                    "%s: %s (з %s) — синтез лишається чинним", bank, decision.reason, decision.since,
+                )
+                continue
+            logger.info("%s: %s — синтезуємо", bank, decision.reason)
 
             try:
                 llm = call_llm(prompt, SYSTEM_PROMPT, purpose=PURPOSE)
@@ -371,10 +415,10 @@ def main() -> None:
                 continue
 
             llm_call_id = log_llm_call(
-                conn, llm=llm, purpose=PURPOSE, prompt=prompt,
-                source_ref=f"{bank}:{meeting:%Y-%m-%d}",
+                conn, llm=llm, purpose=PURPOSE, prompt=prompt, source_ref=source_ref,
             )
             save(conn, bank, entry["rate_metric"], meeting, result, llm_call_id)
+            change_gate.remember(conn, PURPOSE, source_ref, gate["stable"], gate["anchors"])
             done += 1
             logger.info(
                 "%s: засідання %s → %s (ставка %s, упевненість %.2f): %s",

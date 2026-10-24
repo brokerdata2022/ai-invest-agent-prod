@@ -45,6 +45,7 @@ sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_ANALYSIS_DIR, "..", "data-ingestion"))
 sys.path.insert(0, _ANALYSIS_DIR)
 
+from common import market_hours  # noqa: E402
 from common.db import get_connection  # noqa: E402
 
 from crypto.binance_futures_adapter import fetch_market_snapshot as fetch_binance_snapshot  # noqa: E402
@@ -174,6 +175,9 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="порахувати й показати, не писати в БД")
     parser.add_argument("--no-news", action="store_true", help="без LLM-детектора новинних тикерів")
     parser.add_argument("--no-crypto", action="store_true", help="без крипто-детектора (без мережі)")
+    parser.add_argument(
+        "--force", action="store_true", help="детектори акцій і при закритій біржі",
+    )
     args = parser.parse_args()
 
     conn = get_connection()
@@ -184,9 +188,18 @@ def main() -> None:
         found: list = []
         if not args.no_crypto:
             found += collect_crypto(conn, tracked)
-        found += collect_stocks(conn, tracked)
 
-        if not args.no_news:
+        # Вихідні й свята (2026-10-24): детектори акцій (рух цін і
+        # тикери з новин) мовчать, поки біржа закрита — рух п'ятниці вже
+        # показано в п'ятницю, а новачок, на якого не можна відреагувати
+        # до понеділка, — шум. Крипта працює 24/7.
+        stocks_open = args.force or market_hours.is_open("stock")
+        if not stocks_open:
+            logger.info("Біржа акцій сьогодні закрита — детектори акцій пропущено")
+        else:
+            found += collect_stocks(conn, tracked)
+
+        if not args.no_news and stocks_open:
             twelvedata_key = os.environ.get("TWELVEDATA_API_KEY")
             if not twelvedata_key:
                 logger.error("TWELVEDATA_API_KEY не задано — новинний детектор пропущено (див. .env.example)")

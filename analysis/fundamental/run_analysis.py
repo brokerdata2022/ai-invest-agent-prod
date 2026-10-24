@@ -26,6 +26,7 @@ import argparse
 import logging
 import os
 import sys
+from datetime import date
 
 from dotenv import load_dotenv
 import requests
@@ -47,13 +48,16 @@ from llm_common import (  # noqa: E402
     require_api_key,
 )
 
+import change_gate  # noqa: E402
 import config  # noqa: E402
 from fundamental._db import (  # noqa: E402
     fetch_fundamental_series,
+    fetch_latest_analyses,
     fetch_latest_filing_insight,
     fetch_top_stocks,
     fetch_watchlist_assets,
     save_fundamental_analysis,
+    save_verdict,
 )
 from fundamental.checklist import ORIGIN_DEFAULT, resolve_checklist  # noqa: E402
 from fundamental.factors import collect_asset_factors  # noqa: E402
@@ -64,6 +68,19 @@ from fundamental.fundamental_llm import (  # noqa: E402
     build_prompt,
     parse_fundamental_response,
 )
+from fundamental.gate_inputs import asset_gate_inputs, stock_gate_inputs  # noqa: E402
+from fundamental.verdict import (  # noqa: E402
+    SYSTEM_PROMPT as VERDICT_SYSTEM_PROMPT,
+    build_verdict_prompt,
+    parse_verdict_response,
+)
+
+# Що повертає аналіз одного активу/акції: новий висновок збережено,
+# входи не змінились (гейт змін — висновок минулого прогону лишається
+# чинним), або пропущено (замало даних / збій).
+ANALYZED = "analyzed"
+UNCHANGED = "unchanged"
+SKIPPED = "skipped"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -84,9 +101,10 @@ def collect_series(conn, ticker: str) -> tuple[dict, int]:
     return series, revenue_points
 
 
-def analyze_stock(conn, stock: dict) -> bool:
-    """True — аналіз збережено. False — тикер пропущено (замало даних
-    або збійна відповідь LLM); причина в лозі."""
+def analyze_stock(conn, stock: dict, force: bool = False) -> str:
+    """ANALYZED — аналіз збережено; UNCHANGED — входи ті самі, що в
+    минулого аналізу (гейт змін); SKIPPED — замало даних. Причина — у
+    лозі. `force` — оминути гейт (ручний прогін одного тикера)."""
     ticker = stock["ticker"]
     series, revenue_points = collect_series(conn, ticker)
 
@@ -95,7 +113,7 @@ def analyze_stock(conn, stock: dict) -> bool:
             "%s: лише %d квартальних точок виручки (потрібно >= %d) — пропущено",
             ticker, revenue_points, config.MIN_QUARTERS,
         )
-        return False
+        return SKIPPED
 
     valuation = {
         "pe": stock.get("pe"),
@@ -111,6 +129,13 @@ def analyze_stock(conn, stock: dict) -> bool:
             "%s: у промпт додано тези зі звіту %s %s",
             ticker, filing_insight["form"], filing_insight["filing_date"],
         )
+    stable, anchors = stock_gate_inputs(series, valuation, filing_insight)
+    decision = change_gate.check(conn, "fundamental_analysis", ticker, stable, anchors)
+    if not decision.changed and not force:
+        logger.info("%s: %s (з %s) — висновок лишається чинним", ticker, decision.reason, decision.since)
+        return UNCHANGED
+    logger.info("%s: %s — аналізуємо", ticker, decision.reason)
+
     prompt = build_prompt(
         ticker, stock.get("company_name"), series, valuation,
         filing_insight=filing_insight,
@@ -139,15 +164,18 @@ def analyze_stock(conn, stock: dict) -> bool:
         inputs={"valuation": valuation, "series": series},
         llm_call_id=llm_call_id,
     )
+    change_gate.remember(conn, "fundamental_analysis", ticker, stable, anchors)
     logger.info(
         "%s: direction=%s confidence=%.2f (сильних %d, ризиків %d): %s",
         ticker, result.direction, result.confidence,
         len(result.strengths), len(result.risks), result.summary,
     )
-    return True
+    return ANALYZED
 
 
-def analyze_watchlist_asset(conn, asset: dict, watchlist: list[dict], dry_run: bool = False) -> bool:
+def analyze_watchlist_asset(
+    conn, asset: dict, watchlist: list[dict], dry_run: bool = False, force: bool = False,
+) -> str:
     """Розгорнутий аналіз активу СПИСКУ ОБРАНИХ за ЙОГО чинниками
     (рішення користувача 2026-10-04). На відміну від акцій, вхід — не
     звітність, а власний для кожного активу набір чинників: ручний із
@@ -155,7 +183,8 @@ def analyze_watchlist_asset(conn, asset: dict, watchlist: list[dict], dry_run: b
     через Telegram (`fundamental/checklist.py`, 2026-10-20).
 
     `dry_run` — друкує промпт без жодного виклику ШІ (і чек-лист не
-    складається наново — береться збережений)."""
+    складається наново — береться збережений). `force` — оминути гейт
+    змін (ручний прогін одного активу, онбординг)."""
     asset_id = asset["asset_id"]
     checklist = resolve_checklist(conn, asset, watchlist, allow_generate=not dry_run)
     asset_factors = collect_asset_factors(
@@ -182,12 +211,23 @@ def analyze_watchlist_asset(conn, asset: dict, watchlist: list[dict], dry_run: b
             "%s: жоден чинник не має даних — пропущено (аналіз без входів "
             "був би вигадкою)", asset_id,
         )
-        return False
+        return SKIPPED
+
+    stable, anchors = asset_gate_inputs(asset_factors, checklist.origin)
+    decision = change_gate.check(conn, "fundamental_analysis_asset", asset_id, stable, anchors)
 
     prompt = build_asset_prompt(asset_factors)
     if dry_run:
-        print(f"\n===== {asset_id} ({checklist.origin}) =====\n{prompt}\n")
-        return True
+        print(
+            f"\n===== {asset_id} ({checklist.origin}) — гейт: "
+            f"{'змінилось' if decision.changed else 'без змін'}, {decision.reason} =====\n{prompt}\n"
+        )
+        return ANALYZED if decision.changed else UNCHANGED
+
+    if not decision.changed and not force:
+        logger.info("%s: %s (з %s) — висновок лишається чинним", asset_id, decision.reason, decision.since)
+        return UNCHANGED
+    logger.info("%s: %s — аналізуємо", asset_id, decision.reason)
 
     llm = call_llm(prompt, ASSET_SYSTEM_PROMPT, purpose="fundamental_analysis_asset")
     raw_content = llm.text
@@ -222,12 +262,50 @@ def analyze_watchlist_asset(conn, asset: dict, watchlist: list[dict], dry_run: b
         },
         llm_call_id=llm_call_id,
     )
+    change_gate.remember(conn, "fundamental_analysis_asset", asset_id, stable, anchors)
     logger.info(
         "%s: direction=%s confidence=%.2f (чинників %d із %d, сильних %d, "
         "ризиків %d): %s",
         asset_id, result.direction, result.confidence,
         len(asset_factors.available), len(asset_factors.factors),
         len(result.strengths), len(result.risks), result.summary,
+    )
+    return ANALYZED
+
+
+def run_verdict(conn, asset_ids: list[str], today=None) -> bool:
+    """ФІНАЛЬНИЙ ВЕРДИКТ (2026-10-24): один виклик Anthropic поверх
+    останніх висновків по всіх активах прогону. True — збережено.
+
+    Вхід — останній висновок КОЖНОГО активу, не лише сьогоднішній:
+    актив без змін входів сьогодні нового рядка не має, але у вердикті
+    бути мусить (з позначкою "без змін з <дата>")."""
+    today = today or date.today()
+    analyses = fetch_latest_analyses(conn, asset_ids, config.CHANGE_GATE_MAX_AGE_DAYS)
+    if not analyses:
+        logger.warning("Вердикт: немає жодного висновку по активах — пропущено")
+        return False
+
+    prompt = build_verdict_prompt(analyses, today)
+    try:
+        llm = call_llm(prompt, VERDICT_SYSTEM_PROMPT, purpose="fundamental_verdict")
+    except LlmError:
+        # Без вердикту notify надішле висновки по активах як раніше —
+        # окремими повідомленнями, тож інформація не губиться.
+        logger.exception("Вердикт: збій виклику LLM — пропущено")
+        return False
+    llm_call_id = log_llm_call(
+        conn, llm=llm, purpose="fundamental_verdict", prompt=prompt, source_ref=str(today),
+    )
+    try:
+        result = parse_verdict_response(llm.text)
+    except SynthesisResponseError:
+        logger.exception("Вердикт: некоректна відповідь LLM — пропущено")
+        return False
+    save_verdict(conn, today, result, [row["id"] for row in analyses], llm_call_id)
+    logger.info(
+        "Вердикт по %d активах: %s (ключових %d, суперечностей %d)",
+        len(analyses), result.summary[:160], len(result.key_points), len(result.conflicts),
     )
     return True
 
@@ -254,14 +332,22 @@ def main() -> None:
         help="активи watchlist: надрукувати промпт аналізу без жодного виклику ШІ "
              "(чек-лист береться збережений, наново не складається)",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="аналізувати навіть без змін входів (оминути гейт змін)",
+    )
     args = parser.parse_args()
+    # Ручний прогін одного активу/тикера — завжди свіжий аналіз: людина
+    # просить подивитись зараз, а не "те саме, що вчора".
+    force = args.force or bool(args.asset or args.ticker)
 
     if not args.dry_run:
         require_api_key("fundamental_analysis")
 
     conn = get_connection()
     try:
-        analyzed = total = 0
+        analyzed = unchanged = total = 0
+        verdict_assets: list[str] = []
 
         # --- активи СПИСКУ ОБРАНИХ (кожен за своїми чинниками) ---
         if args.only != "stocks":
@@ -277,8 +363,13 @@ def main() -> None:
             for asset in assets:
                 total += 1
                 try:
-                    if analyze_watchlist_asset(conn, asset, watchlist, dry_run=args.dry_run):
-                        analyzed += 1
+                    status = analyze_watchlist_asset(
+                        conn, asset, watchlist, dry_run=args.dry_run, force=force,
+                    )
+                    if status != SKIPPED:
+                        verdict_assets.append(asset["asset_id"])
+                    analyzed += status == ANALYZED
+                    unchanged += status == UNCHANGED
                 except SynthesisResponseError:
                     logger.exception("%s: некоректна відповідь LLM", asset["asset_id"])
                     conn.rollback()
@@ -308,8 +399,11 @@ def main() -> None:
                 for stock in stocks:
                     total += 1
                     try:
-                        if analyze_stock(conn, stock):
-                            analyzed += 1
+                        status = analyze_stock(conn, stock, force=force)
+                        if status != SKIPPED:
+                            verdict_assets.append(stock["ticker"])
+                        analyzed += status == ANALYZED
+                        unchanged += status == UNCHANGED
                     except SynthesisResponseError:
                         logger.exception("%s: некоректна відповідь LLM", stock["ticker"])
                         conn.rollback()
@@ -320,7 +414,20 @@ def main() -> None:
                         logger.exception("%s: аналіз провалився", stock["ticker"])
                         conn.rollback()
 
-        logger.info("Готово: проаналізовано %d з %d", analyzed, total)
+        logger.info(
+            "Готово: проаналізовано %d, без змін входів %d, усього %d",
+            analyzed, unchanged, total,
+        )
+
+        # Фінальний вердикт — лише для повного прогону (не для одного
+        # активу/тикера чи половини) і лише коли є щось нове: якщо
+        # жоден висновок не змінився, вчорашній вердикт лишається
+        # чинним, і в Telegram не йде те саме іншими словами.
+        full_run = not (args.asset or args.ticker or args.only or args.dry_run)
+        if full_run and analyzed:
+            run_verdict(conn, verdict_assets)
+        elif full_run:
+            logger.info("Вердикт: жоден висновок не змінився — пропущено")
     finally:
         conn.close()
 

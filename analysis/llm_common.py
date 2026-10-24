@@ -59,7 +59,7 @@ from typing import Optional
 import requests
 
 import config
-from anthropic_client import AnthropicError, call_anthropic
+from anthropic_client import AnthropicError, call_anthropic, call_anthropic_batch
 from news_analysis.deepseek_client import DeepSeekError, call_deepseek
 
 logger = logging.getLogger(__name__)
@@ -92,12 +92,15 @@ class SynthesisResponseError(ValueError):
 @dataclass
 class LlmRoute:
     """Куди йде конкретний виклик: провайдер, модель і параметри
-    глибини. `effort`/`max_tokens` застосовні лише до Anthropic."""
+    глибини. `effort`/`thinking`/`max_tokens`/`batch` застосовні лише
+    до Anthropic (налаштування — `config.py`, розділ 9)."""
 
     provider: str
     model: str
     effort: Optional[str] = None
     max_tokens: int = 4096
+    thinking: Optional[str] = None
+    batch: bool = False
 
 
 @dataclass
@@ -146,6 +149,8 @@ def resolve_route(purpose: Optional[str] = None) -> LlmRoute:
         model=raw["model"],
         effort=raw.get("effort"),
         max_tokens=raw.get("max_tokens", 4096),
+        thinking=raw.get("thinking"),
+        batch=bool(raw.get("batch")),
     )
 
     override = os.environ.get("SYNTHESIS_LLM_PROVIDER")
@@ -223,6 +228,7 @@ def _call_provider(route: LlmRoute, prompt: str, system_prompt: str) -> str:
             model=route.model,
             effort=route.effort,
             max_tokens=route.max_tokens,
+            thinking=route.thinking,
         )
     raise LlmError(f"Непідтримуваний провайдер {route.provider!r}")
 
@@ -276,6 +282,60 @@ def call_llm(
             model=fallback_route.model,
             fallback_from=f"{route.provider}/{route.model}",
         )
+
+
+def call_llm_batch(
+    items: list[tuple[str, str]],
+    system_prompt: str,
+    purpose: Optional[str] = None,
+) -> dict[str, object]:
+    """Кілька НЕЗАЛЕЖНИХ промптів одного призначення: {ключ: LlmResponse
+    або LlmError}.
+
+    Якщо маршрут має `batch=True` і веде на Anthropic — один пакет
+    через Message Batches API (−50% до ціни, 2026-10-24). Інакше, і
+    також коли пакет не завершився вчасно чи впав цілком, — звичайні
+    `call_llm()` по одному (з тим самим резервом на DeepSeek), тобто
+    пакет ніколи не гірший за послідовні виклики, лише дешевший.
+
+    Помилка одного промпту повертається як `LlmError` у словнику, а не
+    кидається: решта пакета лишається корисною."""
+    route = resolve_route(purpose)
+    results: dict[str, object] = {}
+
+    if route.provider == "anthropic" and route.batch and items:
+        api_key = os.environ.get(api_key_env_for(route.provider) or "")
+        try:
+            raw = call_anthropic_batch(
+                items,
+                api_key=api_key,
+                system_prompt=system_prompt,
+                model=route.model,
+                effort=route.effort,
+                max_tokens=route.max_tokens,
+                thinking=route.thinking,
+                poll_seconds=config.ANTHROPIC_BATCH_POLL_SECONDS,
+                max_wait_seconds=config.ANTHROPIC_BATCH_MAX_WAIT_SECONDS,
+            )
+        except Exception:
+            logger.warning(
+                "Batch для %s не вдався — повторюю звичайними викликами", purpose,
+                exc_info=True,
+            )
+            raw = {}
+        for key, value in raw.items():
+            if isinstance(value, str):
+                results[key] = LlmResponse(text=value, provider=route.provider, model=route.model)
+
+    # Те, що не дав пакет (або пакета не було) — звичайними викликами.
+    for key, prompt in items:
+        if key in results:
+            continue
+        try:
+            results[key] = call_llm(prompt, system_prompt, purpose=purpose)
+        except LlmError as error:
+            results[key] = error
+    return results
 
 
 def strip_code_fence(raw_content: str) -> str:

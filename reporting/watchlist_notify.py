@@ -42,6 +42,7 @@ from dotenv import load_dotenv
 # не валідне ім'я Python-пакета), тому імпортується ПЕРШИМ.
 from _common import bold, escape_html, resolve_telegram_credentials  # noqa: E402
 from common.db import fetch_recent, get_connection  # noqa: E402
+from common import market_hours  # noqa: E402
 from common.freshness import is_stale as _is_stale  # noqa: E402
 from common.quality import has_volatile_recent_revisions  # noqa: E402
 from common.watchlist_db import fetch_watchlist  # noqa: E402
@@ -104,6 +105,7 @@ def fetch_watchlist_snapshot(conn) -> list[dict]:
             {
                 "asset_id": asset_id,
                 "label": label,
+                "asset_class": row.get("asset_class"),
                 "price": latest["value"],
                 "observed_at": latest["observed_at"],
                 "change_pct": change_pct,
@@ -142,8 +144,18 @@ def _format_change(change_pct: Optional[Decimal], change_days: Optional[int]) ->
     return f"{period}: {float(change_pct):+.2f}%"
 
 
-def format_message(rows: list[dict]) -> str:
-    if not rows:
+def split_by_market(rows: list[dict], at=None) -> tuple[list[dict], list[dict]]:
+    """(ринок торгується, ринок закритий) — 2026-10-24: у вихідні й
+    свята ціни закритих ринків не змінюються, і повний список із тими
+    самими п'ятничними цифрами лише шумів. Закриті показуються одним
+    рядком унизу, а не зникають: видно, що актив не загубився."""
+    open_rows = [r for r in rows if market_hours.is_open(r.get("asset_class"), at)]
+    closed_rows = [r for r in rows if not market_hours.is_open(r.get("asset_class"), at)]
+    return open_rows, closed_rows
+
+
+def format_message(rows: list[dict], closed: Optional[list[dict]] = None) -> str:
+    if not rows and not closed:
         return "💰 Дані watchlist-активів ще не зібрані."
 
     stale_rows = [row for row in rows if row.get("is_stale")]
@@ -202,6 +214,11 @@ def format_message(rows: list[dict]) -> str:
         lines.append("")
         lines.append(f"🔀 Нестабільні ревізії (перевірте вручну): {escape_html(names)}")
 
+    if closed:
+        names = ", ".join(row["label"] for row in closed)
+        lines.append("")
+        lines.append(f"💤 Ринок закритий (ціни з останньої сесії): {escape_html(names)}")
+
     return "\n".join(lines).rstrip()
 
 
@@ -223,9 +240,20 @@ def main() -> None:
         logger.info("Жодного watchlist-активу з даними — сповіщення не надсилається")
         return
 
-    text = format_message(rows)
+    open_rows, closed_rows = split_by_market(rows)
+    if not open_rows:
+        logger.info(
+            "Усі %d активів watchlist на закритих ринках — сповіщення не надсилається",
+            len(rows),
+        )
+        return
+
+    text = format_message(open_rows, closed_rows)
     send_telegram_message(token, chat_id, text, parse_mode="HTML")
-    logger.info("Надіслано в Telegram: watchlist, %d активів", len(rows))
+    logger.info(
+        "Надіслано в Telegram: watchlist, %d активів (закритих ринків: %d)",
+        len(open_rows), len(closed_rows),
+    )
 
 
 if __name__ == "__main__":

@@ -520,6 +520,15 @@ JOBS = {
     "daily_digest": {
         "subprocess": _py(str(REPO_ROOT / "reporting" / "daily_digest.py")),
     },
+    # Підсумок вихідних (2026-10-24): замість денних брифів і синтезів
+    # на закритих ринках — один висновок у неділю ввечері про те, що
+    # може дати геп у понеділок.
+    "weekend_wrap": {
+        "subprocess": _py(str(REPO_ROOT / "analysis" / "news_analysis" / "weekend_wrap.py")),
+    },
+    "notify_weekend_wrap": {
+        "subprocess": _py(str(REPO_ROOT / "reporting" / "weekend_wrap_notify.py")),
+    },
     "crypto_prices": {
         "callable": _crypto_prices,
     },

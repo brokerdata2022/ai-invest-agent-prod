@@ -32,7 +32,8 @@
 """
 
 import logging
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ def call_anthropic(
     effort: Optional[str] = None,
     max_tokens: int = 4096,
     client=None,
+    thinking: Optional[str] = None,
 ) -> str:
     """Викликає Anthropic Messages API, повертає сирий текст відповіді
     (склеєні всі text-блоки). `client` — для тестів без мережі.
@@ -64,6 +66,25 @@ def call_anthropic(
 
         client = anthropic.Anthropic(api_key=api_key)
 
+    request = build_request(prompt, system_prompt, model, effort, max_tokens, thinking)
+    response = client.messages.create(**request)
+    return extract_text(response, model)
+
+
+def build_request(
+    prompt: str,
+    system_prompt: Optional[str],
+    model: str,
+    effort: Optional[str],
+    max_tokens: int,
+    thinking: Optional[str] = None,
+) -> dict:
+    """Тіло запиту Messages API — одне для звичайного виклику й для
+    Batch API (там воно йде як `params` кожного запиту пакета).
+
+    `thinking` (2026-10-24, налаштування користувача в `config.py`):
+    None — поле не передається (модель думає за своїм дефолтом, як і
+    до цієї зміни); "adaptive"/"disabled" — передається явно."""
     request: dict = {
         "model": model,
         "max_tokens": max_tokens,
@@ -73,9 +94,14 @@ def call_anthropic(
         request["system"] = system_prompt
     if effort:
         request["output_config"] = {"effort": effort}
+    if thinking:
+        request["thinking"] = {"type": thinking}
+    return request
 
-    response = client.messages.create(**request)
 
+def extract_text(response, model: str) -> str:
+    """Текст відповіді (склеєні text-блоки) або `AnthropicError` —
+    спільне для звичайного виклику й результату пакета."""
     # Відмова класифікатора безпеки приходить як HTTP 200 зі
     # stop_reason="refusal" — без цієї перевірки код пішов би читати
     # порожній content і впав би незрозуміло.
@@ -108,3 +134,80 @@ def call_anthropic(
         )
 
     return "\n".join(texts)
+
+
+def call_anthropic_batch(
+    items: list[tuple[str, str]],
+    api_key: str,
+    system_prompt: Optional[str] = None,
+    model: str = "claude-sonnet-5",
+    effort: Optional[str] = None,
+    max_tokens: int = 4096,
+    thinking: Optional[str] = None,
+    poll_seconds: int = 30,
+    max_wait_seconds: int = 1500,
+    client=None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, object]:
+    """Пакет запитів через Message Batches API — та сама відповідь за
+    половину ціни, але асинхронно (2026-10-24, `filing_insight`).
+
+    `items` — [(ключ викликача, промпт)]. Повертає {ключ: текст або
+    `AnthropicError`} — помилка ОДНОГО запиту не валить решту пакета.
+
+    Якщо пакет не завершився за `max_wait_seconds`, він скасовується і
+    кидається `AnthropicError`: викликач тоді повторює звичайними
+    викликами (`llm_common.call_llm_batch`), а не чекає добу. Дефолт
+    25 хв — у межах 30-хвилинного таймауту джоби (`runner.py`).
+
+    `custom_id` у API обмежений `[a-zA-Z0-9_-]{1,64}`, тож ключі
+    викликача (тикери тощо) замінюються порядковими номерами."""
+    if client is None:
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key)
+
+    keys = {f"r{index}": key for index, (key, _prompt) in enumerate(items)}
+    requests_ = [
+        {
+            "custom_id": f"r{index}",
+            "params": build_request(prompt, system_prompt, model, effort, max_tokens, thinking),
+        }
+        for index, (_key, prompt) in enumerate(items)
+    ]
+    batch = client.messages.batches.create(requests=requests_)
+    logger.info("Anthropic batch %s: %d запитів відправлено", batch.id, len(requests_))
+
+    waited = 0
+    while getattr(batch, "processing_status", None) != "ended":
+        if waited >= max_wait_seconds:
+            try:
+                client.messages.batches.cancel(batch.id)
+            except Exception:
+                logger.warning("Не вдалося скасувати batch %s", batch.id, exc_info=True)
+            raise AnthropicError(
+                f"batch {batch.id} не завершився за {max_wait_seconds} с — скасовано"
+            )
+        sleep(poll_seconds)
+        waited += poll_seconds
+        batch = client.messages.batches.retrieve(batch.id)
+
+    results: dict[str, object] = {}
+    for entry in client.messages.batches.results(batch.id):
+        key = keys.get(entry.custom_id)
+        if key is None:
+            continue
+        result = entry.result
+        if getattr(result, "type", None) == "succeeded":
+            try:
+                results[key] = extract_text(result.message, model)
+            except AnthropicError as error:
+                results[key] = error
+        else:
+            results[key] = AnthropicError(
+                f"запит пакета {entry.custom_id} ({key}): {getattr(result, 'type', None)}"
+            )
+    for key in keys.values():
+        results.setdefault(key, AnthropicError(f"{key}: немає результату в пакеті"))
+    logger.info("Anthropic batch %s: завершено за ~%d с", batch.id, waited)
+    return results

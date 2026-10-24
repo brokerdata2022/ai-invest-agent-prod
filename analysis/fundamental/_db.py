@@ -210,3 +210,64 @@ def fetch_snapshot(conn, ticker: str, sources: tuple[str, ...], fields: tuple[st
     for source, metric_id, value, observed_at in rows:
         out.setdefault(metric_id[len(prefix):], {})[source] = (value, observed_at)
     return out
+
+
+def fetch_latest_analyses(conn, asset_ids: list[str], max_age_days: int) -> list[dict]:
+    """Останній висновок по кожному з `asset_ids` не старший за
+    `max_age_days` — вхід фінального вердикту (2026-10-24). Не лише
+    сьогоднішні: актив, чиї входи не змінились (гейт змін), сьогодні
+    нового рядка не має, але у вердикті бути мусить."""
+    if not asset_ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (asset_id)
+                   id, asset_id, asset_kind, company_name, direction, confidence,
+                   summary, strengths, risks, created_at
+            FROM fundamental_analysis
+            WHERE asset_id = ANY(%s)
+              AND created_at >= now() - make_interval(days => %s)
+            ORDER BY asset_id, created_at DESC
+            """,
+            (list(asset_ids), max_age_days),
+        )
+        columns = [c[0] for c in cur.description]
+        rows = [dict(zip(columns, r)) for r in cur.fetchall()]
+    order = {asset_id: i for i, asset_id in enumerate(asset_ids)}
+    return sorted(rows, key=lambda r: order.get(r["asset_id"], len(order)))
+
+
+def save_verdict(conn, verdict_date, result, analysis_ids: list[int], llm_call_id) -> int:
+    """UPSERT на день: повторний прогін того ж дня (ручний) оновлює
+    вердикт і знову робить його ненадісланим — той самий принцип, що
+    `save_fundamental_analysis`."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO fundamental_verdict
+                (verdict_date, summary, key_points, conflicts, watch, analysis_ids, llm_call_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (verdict_date) DO UPDATE SET
+                summary = EXCLUDED.summary,
+                key_points = EXCLUDED.key_points,
+                conflicts = EXCLUDED.conflicts,
+                watch = EXCLUDED.watch,
+                analysis_ids = EXCLUDED.analysis_ids,
+                llm_call_id = EXCLUDED.llm_call_id,
+                created_at = now(),
+                notified_at = NULL
+            RETURNING id
+            """,
+            (
+                verdict_date, result.summary,
+                json.dumps(result.key_points, ensure_ascii=False),
+                json.dumps(result.conflicts, ensure_ascii=False),
+                json.dumps(result.watch, ensure_ascii=False),
+                json.dumps(analysis_ids),
+                llm_call_id,
+            ),
+        )
+        verdict_id = cur.fetchone()[0]
+    conn.commit()
+    return verdict_id

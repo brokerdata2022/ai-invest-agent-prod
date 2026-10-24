@@ -161,12 +161,106 @@ def test_backtest_shares_the_forecast_route(monkeypatch):
     assert resolve_route("metric_forecast_backtest") == resolve_route("metric_forecast")
 
 
-def test_synthesis_routes_go_to_sonnet(monkeypatch):
+FINAL_VERDICT_PURPOSES = (
+    "expectation_synthesis", "market_context_synthesis", "policy_rate_synthesis",
+    "fundamental_verdict", "weekend_wrap", "filing_insight",
+)
+# 2026-10-24 (рішення користувача: "скоротити Anthropic, збільшити
+# DeepSeek без втрати якості"): підготовча робота під фінальні висновки.
+PREPARATORY_PURPOSES = (
+    "fundamental_analysis", "fundamental_analysis_asset",
+    "news_price_synthesis", "calendar_outlook",
+)
+
+
+def test_final_verdicts_go_to_sonnet(monkeypatch):
     monkeypatch.delenv("SYNTHESIS_LLM_PROVIDER", raising=False)
-    for purpose in ("market_context_synthesis", "news_price_synthesis", "calendar_outlook"):
+    for purpose in FINAL_VERDICT_PURPOSES:
         route = resolve_route(purpose)
-        assert route.provider == "anthropic"
+        assert route.provider == "anthropic", purpose
         assert route.model == config.ANTHROPIC_MODEL_SYNTHESIS
+
+
+def test_preparatory_work_goes_to_deepseek(monkeypatch):
+    """Якщо хтось поверне аналіз кожного активу на Sonnet, це знову
+    ~14 викликів Anthropic на день замість одного вердикту."""
+    monkeypatch.delenv("SYNTHESIS_LLM_PROVIDER", raising=False)
+    for purpose in PREPARATORY_PURPOSES:
+        assert resolve_route(purpose).provider == "deepseek", purpose
+
+
+def test_reasoning_defaults_are_unchanged(monkeypatch):
+    """Налаштування глибини винесено в конфіг (2026-10-24) без зміни
+    поведінки: effort=medium, thinking не передається."""
+    monkeypatch.delenv("SYNTHESIS_LLM_PROVIDER", raising=False)
+    for purpose in FINAL_VERDICT_PURPOSES:
+        route = resolve_route(purpose)
+        assert route.effort == "medium", purpose
+        assert route.thinking is None, purpose
+
+
+def test_only_filing_insight_is_batched(monkeypatch):
+    """Batch API — лише там, де відповідь не горить: бриф чи сюрприз
+    релізу, що прийшов через 20 хв, був би зіпсованим."""
+    monkeypatch.delenv("SYNTHESIS_LLM_PROVIDER", raising=False)
+    batched = {p for p in config.LLM_ROUTES if resolve_route(p).batch}
+    assert batched == {"filing_insight"}
+
+
+def test_call_llm_passes_thinking_from_route(monkeypatch):
+    monkeypatch.delenv("SYNTHESIS_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake")
+    seen = {}
+
+    def fake_anthropic(prompt, **kwargs):
+        seen.update(kwargs)
+        return "{}"
+
+    monkeypatch.setattr(llm_common, "call_anthropic", fake_anthropic)
+    monkeypatch.setitem(
+        config.LLM_ROUTES, "market_context_synthesis",
+        config._anthropic(effort="low", thinking="disabled"),
+    )
+    call_llm("p", "s", purpose="market_context_synthesis")
+    assert seen["effort"] == "low"
+    assert seen["thinking"] == "disabled"
+
+
+def test_call_llm_batch_uses_batch_api_for_batched_route(monkeypatch):
+    monkeypatch.delenv("SYNTHESIS_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake")
+    monkeypatch.setattr(
+        llm_common, "call_anthropic_batch",
+        lambda items, **kwargs: {key: f"text-{key}" for key, _ in items},
+    )
+    monkeypatch.setattr(
+        llm_common, "call_llm",
+        lambda *a, **k: pytest.fail("не мав іти звичайним викликом"),
+    )
+    out = llm_common.call_llm_batch([("a", "p1"), ("b", "p2")], "sys", purpose="filing_insight")
+    assert {k: v.text for k, v in out.items()} == {"a": "text-a", "b": "text-b"}
+
+
+def test_call_llm_batch_falls_back_to_single_calls(monkeypatch):
+    """Пакет упав цілком або один запит у ньому — решта йде звичайними
+    викликами: пакет ніколи не гірший за послідовні виклики."""
+    monkeypatch.delenv("SYNTHESIS_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake")
+    monkeypatch.setattr(
+        llm_common, "call_anthropic_batch",
+        lambda items, **kwargs: {"a": "from-batch", "b": RuntimeError("errored")},
+    )
+    calls = []
+
+    def single(prompt, system_prompt, purpose=None, route=None):
+        calls.append(prompt)
+        return llm_common.LlmResponse(text="single", provider="anthropic", model="m")
+
+    monkeypatch.setattr(llm_common, "call_llm", single)
+    out = llm_common.call_llm_batch([("a", "p1"), ("b", "p2")], "sys", purpose="filing_insight")
+    assert out["a"].text == "from-batch"
+    assert out["b"].text == "single"
+    assert calls == ["p2"]
 
 
 def test_bulk_routes_stay_on_deepseek(monkeypatch):

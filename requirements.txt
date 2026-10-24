@@ -9,3 +9,6 @@ anthropic>=1.0,<2
 # Старий двійковий Excel (BIFF) — звіт ICE про сертифіковані запаси кави
 # (data-ingestion/commodities/ice_coffee_adapter.py, 2026-10-20).
 xlrd>=2.0,<3
+# Біржові календарі свят (XNYS/XJPX/XETR/CME) — вихідні й свята ринків
+# (data-ingestion/common/market_hours.py, 2026-10-24). Чистий Python.
+holidays>=0.107,<1

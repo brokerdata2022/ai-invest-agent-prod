@@ -463,12 +463,12 @@ def test_remove_asset_deletes_row_checklist_and_derived_analyses():
     deleted = [s.split()[2] for s in statements if s.startswith("DELETE FROM")]
     assert deleted == [
         "asset_checklists", "fundamental_analysis", "news_synthesis",
-        "news_consolidated", "trading_list", "watchlist_assets",
+        "news_consolidated", "trading_list", "llm_input_fingerprints", "watchlist_assets",
     ]
     # Список торгів — лише рядки, що прийшли зі списку обраних
     assert any("trading_list" in s and "source = 'watchlist'" in s for s in statements)
     assert set(removed) == {"asset_checklists", "fundamental_analysis", "news_synthesis",
-                            "news_consolidated", "trading_list"}
+                            "news_consolidated", "trading_list", "llm_input_fingerprints"}
     assert conn.committed
 
 

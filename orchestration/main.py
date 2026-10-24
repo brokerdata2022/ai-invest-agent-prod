@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data-ingestion"
 from alerts import notify_scheduler_gap  # noqa: E402
 from common.db import get_connection  # noqa: E402
 from jobs import JOBS  # noqa: E402
-from runner import run_job  # noqa: E402
+from runner import run_scheduled  # noqa: E402
 from schedule import SCHEDULE, TIMEZONE  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -61,9 +61,9 @@ def build_scheduler() -> BlockingScheduler:
         job_timezone = cfg.get("timezone", TIMEZONE)
         trigger = CronTrigger(**cfg["trigger"], timezone=job_timezone)
         scheduler.add_job(
-            run_job,
+            run_scheduled,
             trigger=trigger,
-            args=[job_name],
+            args=[job_name, cfg],
             id=job_name,
             max_instances=1,
             misfire_grace_time=300,

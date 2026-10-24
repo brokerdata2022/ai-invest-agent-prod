@@ -47,6 +47,7 @@ sys.path.insert(0, os.path.join(_ANALYSIS_DIR, "..", "data-ingestion"))
 sys.path.insert(0, _ANALYSIS_DIR)
 
 from common.db import get_connection  # noqa: E402
+from common import market_hours  # noqa: E402
 from common.watchlist_db import fetch_price_sources  # noqa: E402
 from news_analysis.prices import (  # noqa: E402
     fetch_all_price_changes,
@@ -77,6 +78,7 @@ from trading_list.categories import (  # noqa: E402
     watchlist_assets_for_category,
 )
 from trading_list.scoring import (  # noqa: E402
+    REJECT_MARKET_CLOSED,
     REJECT_NO_CATALYST,
     CatalystHit,
     ScoreBreakdown,
@@ -601,6 +603,9 @@ def build_list(
     passed: list[tuple[str, ScoreBreakdown, bool]] = []
     extras: dict[str, dict] = {}
     for asset_id, breakdown, is_watchlist, meta in candidates:
+        if not market_hours.is_open(meta["class"], now):
+            reject(asset_id, REJECT_MARKET_CLOSED)
+            continue
         today_hits = [h for h in meta["own_hits"] if is_today_catalyst(h, meta["class"], now)]
         direction = trading_direction(
             today_hits, breakdown.trend_direction,
