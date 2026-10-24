@@ -48,7 +48,7 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "reporting"))
 from common.db import get_connection  # noqa: E402
 
 import config  # noqa: E402
-from assistant import _db, context as ctx, resolve  # noqa: E402
+from assistant import _db, context as ctx, full_analysis, resolve  # noqa: E402
 from llm_common import (  # noqa: E402
     LlmError,
     SynthesisResponseError,
@@ -237,8 +237,31 @@ def main() -> None:
     parser.add_argument("--show-context", action="store_true", help="надрукувати зібраний контекст")
     args = parser.parse_args()
 
+    from _common import send_report  # noqa: E402
+    from fundamental_notify import format_asset_message  # noqa: E402
+
     conn = get_connection()
     try:
+        # Повний розбір активу (2026-10-24): «повний аналіз золота» —
+        # розгорнутий розбір за чинниками, а не 8 речень переказу.
+        limit_reason = check_limits(conn)
+        full = None if limit_reason else full_analysis.full_analysis_reply(
+            conn, args.question, format_asset_message,
+        )
+        if full is not None:
+            if not args.notify:
+                print(full)
+                return
+            # HTML (той самий формат, що автоматичні повідомлення до
+            # 24.10); довгий текст ділить сам telegram_client по рядках —
+            # обрізати HTML посеред тегу не можна.
+            result = send_report(full, parse_mode="HTML")
+            logger.info(
+                "Повний розбір %s (%d символів)",
+                "НЕ надіслано: середовище " + result["skipped_env"] if result.get("skipped_env") else "надіслано",
+                len(full),
+            )
+            return
         reply = answer(conn, args.question, show_context=args.show_context)
     finally:
         conn.close()
@@ -246,8 +269,6 @@ def main() -> None:
     if not args.notify:
         print(reply)
         return
-
-    from _common import send_report  # noqa: E402
 
     # parse_mode=None свідомо: відповідь — вільний текст від моделі, і
     # випадковий "<" чи незакритий тег зробив би HTML невалідним, а

@@ -8,7 +8,7 @@ Tier A/B/C (тикер/назва/зміна ціни), тут — ІНТЕРП�
 звітності, для активів списку обраних — їхніх власних чинників
 (золото: реальні ставки й долар; USD/JPY: різниця ставок ФРС/БОЯ).
 
-## Одне повідомлення НА АКТИВ, не одне на всіх
+## До 2026-10-24: одне повідомлення НА АКТИВ (тепер — `format_asset_message` для /ask)
 
 Рішення користувача 2026-10-04: "розгорнутий аналіз по активах із
 списку вибраних... користувачу надсилати висновок цього аналізу".
@@ -17,16 +17,21 @@ Tier A/B/C (тикер/назва/зміна ціни), тут — ІНТЕРП�
 (HTTP 400). Той самий урок, що вже був із `synthesis_notify.py`
 (docs/decisions.md, 2026-10-02).
 
-## З 2026-10-24: вердикт + короткі рядки
+## З 2026-10-24: лише вердикт; розгорнутий розбір — через /ask
 
 Аналіз кожного активу тепер робить DeepSeek, а Anthropic — один
-ФІНАЛЬНИЙ ВЕРДИКТ поверх усіх (`fundamental_verdict`, рішення
-користувача: "скоротити Anthropic без втрати якості"). Коли вердикт є,
-йде ОДНЕ повідомлення: вердикт (головне, суперечності, на що зважати)
-і під ним по рядку на актив. Розгорнутий розбір кожного активу лишається
-в БД (його бачить `/ask`). Без вердикту (збій виклику, ручний прогін
-одного активу) — як раніше, окреме повідомлення на актив, щоб
-висновок не загубився.
+ФІНАЛЬНИЙ ВЕРДИКТ поверх усіх (`fundamental_verdict`). Автоматично йде
+ОДНЕ повідомлення: вердикт (головне, суперечності, на що зважати) і
+під ним по рядку на актив. Розгорнутий розбір активу (по чинниках, за
+і проти) — на запит: `/ask повний аналіз золота`
+(`analysis/assistant/full_analysis.py`, той самий `format_asset_message`
+нижче). Рішення користувача того ж дня, після того як перша ручна
+відправка вивалила в чат 20 старих розборів із черги.
+
+Без вердикту (збій виклику) — той самий список рядків без вердикту.
+Після надсилання ВСЯ черга ненадісланих висновків позначається
+обробленою: розгорнуті розбори автоматично не йдуть, тож їй нічого
+чекати.
 
 Тільки форматування вже готового результату, жодної аналітики
 (reporting/CLAUDE.md). Формулювання описові, без "купити/продати"
@@ -43,6 +48,7 @@ from dotenv import load_dotenv
 
 # _common додає data-ingestion у sys.path, тому імпортується ПЕРШИМ.
 from _common import (  # noqa: E402
+    DISPLAY_TIMEZONE,
     DIRECTION_EMOJI,
     bold,
     escape_html,
@@ -62,21 +68,6 @@ DIRECTION_WORD = {
     "neutral": "картина стабільна",
     "unclear": "картина неоднозначна",
 }
-
-
-def fetch_unnotified(conn, limit: int = 10) -> list[dict]:
-    return fetch_dicts(
-        conn,
-        """
-        SELECT id, asset_id, asset_kind, ticker, company_name, direction,
-               confidence, summary, reasoning, strengths, risks
-        FROM fundamental_analysis
-        WHERE notified_at IS NULL
-        ORDER BY created_at DESC
-        LIMIT %s
-        """,
-        (limit,),
-    )
 
 
 ASSET_KIND_TITLE = {
@@ -199,51 +190,91 @@ def format_verdict_message(verdict: dict, analyses: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def fetch_today_unnotified(conn) -> list[dict]:
+    """Сьогоднішні ненадіслані висновки — для повідомлення без вердикту
+    (вердикт не вдався): рядки по активах усе одно мають дійти."""
+    return fetch_dicts(
+        conn,
+        """
+        SELECT id, asset_id, asset_kind, company_name, direction, confidence,
+               summary, created_at, notified_at
+        FROM fundamental_analysis
+        WHERE notified_at IS NULL
+          AND (created_at AT TIME ZONE %s)::date = (now() AT TIME ZONE %s)::date
+        ORDER BY asset_kind DESC, created_at
+        """,
+        (DISPLAY_TIMEZONE, DISPLAY_TIMEZONE),
+    )
+
+
+def mark_all_unnotified(conn) -> int:
+    """Позначити ВСЮ чергу ненадісланих висновків як оброблену.
+
+    Розгорнуті розбори автоматично більше не надсилаються (рішення
+    користувача 2026-10-24: "лишаємо загальний аналіз, розбір по
+    чинниках — через /ask"), тож черга нічого не чекає. Заодно
+    прибирається накопичене до цієї зміни: старе надсилання брало 10
+    найновіших із 16 щоденних висновків, і 6 щодня лишались у черзі —
+    на 24.10 їх було 54 у продакшені."""
+    with conn.cursor() as cur:
+        cur.execute("UPDATE fundamental_analysis SET notified_at = now() WHERE notified_at IS NULL")
+        count = cur.rowcount
+    conn.commit()
+    return count
+
+
+def format_list_message(rows: list[dict]) -> str:
+    """Без вердикту (збій виклику): той самий список рядків по активах,
+    щоб висновки дня не загубились."""
+    lines = [bold("📊 Фундаментальний аналіз — висновки по активах"), ""]
+    for row in rows:
+        name = row.get("company_name") or row["asset_id"]
+        emoji = DIRECTION_EMOJI.get(row["direction"], "❓")
+        lines.append(
+            f"{emoji} {bold(name)} · {float(row['confidence']):.2f} — {escape_html(row['summary'])}"
+        )
+    lines.append("")
+    lines.append("<i>Загального вердикту сьогодні немає. Повний розбір активу — "
+                 "/ask «повний аналіз &lt;актив&gt;».</i>")
+    return "\n".join(lines)
+
+
 def main() -> None:
     load_dotenv()
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--dry-run", action="store_true", help="надрукувати, не надсилати і не позначати")
     args = parser.parse_args()
-
-    token, chat_id = resolve_telegram_credentials()
 
     conn = get_connection()
     try:
         verdict = fetch_unnotified_verdict(conn)
         if verdict is not None:
             analyses = fetch_verdict_analyses(conn, verdict.get("analysis_ids") or [])
-            send_telegram_message(
-                token, chat_id, format_verdict_message(verdict, analyses), parse_mode="HTML"
-            )
-            mark_notified(conn, "fundamental_verdict", [verdict["id"]])
-            # Висновки, що вже показані рядком під вердиктом, окремим
-            # повідомленням не йдуть.
-            fresh = [row["id"] for row in analyses if row.get("notified_at") is None]
-            mark_notified(conn, "fundamental_analysis", fresh)
-            logger.info(
-                "Надіслано в Telegram: вердикт + %d активів (%d нових висновків)",
-                len(analyses), len(fresh),
-            )
+            text = format_verdict_message(verdict, analyses)
+        else:
+            analyses = fetch_today_unnotified(conn)
+            text = format_list_message(analyses) if analyses else None
 
-        rows = fetch_unnotified(conn, limit=args.limit)
-        if not rows:
-            if verdict is None:
-                logger.info("Нових фундаментальних аналізів немає — не надсилаємо")
+        if args.dry_run:
+            print(text or "Нового вердикту й сьогоднішніх висновків немає — нічого не надсилали б")
             return
 
-        # Окреме повідомлення на кожен актив — розгорнутий розбір не
-        # вміщається батчем у ліміт Telegram (див. докстрінг модуля).
-        # mark_notified ПО ОДНОМУ: якщо відправка впаде на пʼятому
-        # активі, перші чотири лишаться позначеними й не підуть удруге.
-        sent = 0
-        for row in rows:
-            send_telegram_message(
-                token, chat_id, format_asset_message(row), parse_mode="HTML"
+        if text is not None:
+            token, chat_id = resolve_telegram_credentials()
+            send_telegram_message(token, chat_id, text, parse_mode="HTML")
+            if verdict is not None:
+                mark_notified(conn, "fundamental_verdict", [verdict["id"]])
+            logger.info(
+                "Надіслано в Telegram: %s, %d активів",
+                "вердикт" if verdict is not None else "список без вердикту", len(analyses),
             )
-            mark_notified(conn, "fundamental_analysis", [row["id"]])
-            sent += 1
-        logger.info("Надіслано в Telegram: %d аналізів (окремими повідомленнями)", sent)
+        else:
+            logger.info("Нового вердикту й сьогоднішніх висновків немає — не надсилаємо")
+
+        skipped = mark_all_unnotified(conn)
+        if skipped:
+            logger.info("Черга висновків позначена обробленою: %d (розгорнуто — лише через /ask)", skipped)
     finally:
         conn.close()
 

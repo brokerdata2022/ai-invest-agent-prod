@@ -85,3 +85,44 @@ def test_weekend_wrap_message():
     assert "risk-off" in text
     assert "⚡ Нафта — удари по танкерах" in text
     assert "👁 Відкриття Токіо" in text
+
+
+def test_list_message_without_verdict_points_to_ask():
+    from fundamental_notify import format_list_message
+
+    text = format_list_message([
+        {"asset_id": "btc", "company_name": "BTC", "direction": "up", "confidence": 0.5, "summary": "Ріст."},
+    ])
+    assert "🟢 <b>BTC</b> · 0.50 — Ріст." in text
+    assert "/ask" in text
+
+
+def test_mark_all_unnotified_clears_whole_queue():
+    from fundamental_notify import mark_all_unnotified
+
+    class _Cur:
+        rowcount = 54
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+    class _Conn:
+        committed = False
+
+        def cursor(self):
+            self.cur = _Cur()
+            return self.cur
+
+        def commit(self):
+            self.committed = True
+
+    conn = _Conn()
+    assert mark_all_unnotified(conn) == 54
+    assert "WHERE notified_at IS NULL" in conn.cur.sql
+    assert conn.committed

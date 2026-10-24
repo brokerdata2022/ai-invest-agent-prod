@@ -271,3 +271,47 @@ def save_verdict(conn, verdict_date, result, analysis_ids: list[int], llm_call_i
         verdict_id = cur.fetchone()[0]
     conn.commit()
     return verdict_id
+
+
+def fetch_stock_for_analysis(conn, ticker: str) -> dict:
+    """Рядок акції для `analyze_stock` поза топом скринінгу (запит
+    `/ask`, 2026-10-24): оцінка з останнього прогону скринінгу, якщо
+    тикер там є; інакше лише тикер — аналіз тоді йде без P/E і темпів."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT ticker, company_name, score, pe, revenue_growth, eps_growth
+            FROM screening_results
+            WHERE upper(ticker) = upper(%s)
+              AND run_at = (SELECT MAX(run_at) FROM screening_results)
+            LIMIT 1
+            """,
+            (ticker,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return {"ticker": ticker.upper(), "company_name": None}
+        columns = [c[0] for c in cur.description]
+    return dict(zip(columns, row))
+
+
+def fetch_latest_full_analysis(conn, asset_id: str) -> Optional[dict]:
+    """Останній висновок активу з УСІМА полями — для розгорнутого
+    повідомлення на запит `/ask`."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, asset_id, asset_kind, ticker, company_name, direction, confidence,
+                   summary, reasoning, strengths, risks, created_at
+            FROM fundamental_analysis
+            WHERE asset_id = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (asset_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        columns = [c[0] for c in cur.description]
+    return dict(zip(columns, row))
