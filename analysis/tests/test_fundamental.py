@@ -138,3 +138,14 @@ def test_parse_caps_number_of_points():
 def test_parse_rejects_non_json():
     with pytest.raises(SynthesisResponseError):
         parse_fundamental_response("компанія виглядає добре")
+
+
+def test_parse_accepts_reasoning_as_list_and_keeps_items_on_lines():
+    """З 2026-10-24 модель просять давати reasoning масивом — по пункту
+    на чинник; зберігається рядком із пунктами на окремих рядках."""
+    raw = json.dumps({
+        "direction": "down", "confidence": 0.6, "summary": "s",
+        "reasoning": ["Ціна: впала на 4%", "Підсумок: тиск униз"],
+    })
+    result = parse_fundamental_response(raw)
+    assert result.reasoning == "Ціна: впала на 4%\nПідсумок: тиск униз"

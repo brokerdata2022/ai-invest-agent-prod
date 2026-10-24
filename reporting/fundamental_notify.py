@@ -43,6 +43,7 @@ Tier A/B/C (тикер/назва/зміна ціни), тут — ІНТЕРП�
 
 import argparse
 import logging
+import re
 
 from dotenv import load_dotenv
 
@@ -76,6 +77,49 @@ ASSET_KIND_TITLE = {
 }
 
 
+# Розбір по чинниках приходить від моделі одним абзацом ("1) Ціна…
+# 2) Дохідність…"), реченнями підряд ("Ціна BTC: …. Обсяг торгів: …")
+# або навіть сирим JSON-масивом — живі повідомлення 24.10 читались як
+# суцільна стіна тексту (фідбек користувача). Тут лише ВИГЛЯД: текст
+# ділиться на пункти, нічого не переписується.
+_NUMBERED = re.compile(r"(?:(?<=\s)|^)\d{1,2}[).]\s+")
+# Новий пункт — речення, що починається з назви чинника й двокрапки
+# ("Обсяг торгів: …"); назва — до 60 символів без крапки.
+_LABELED_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-ZА-ЯІЇЄҐ][^.:!?\n]{1,60}:\s)")
+_SUMMARY = re.compile(r"\s+(?=(?:Підсумок|Висновок|Разом)\s*:)")
+_LABEL = re.compile(r"^([^:\n]{2,60}):\s+(.+)$", re.S)
+_QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def split_reasoning(text) -> list[str]:
+    """Розбір по чинниках → окремі пункти (порядок збережено)."""
+    if isinstance(text, list):
+        return [str(item).strip() for item in text if str(item).strip()]
+    text = str(text or "").strip()
+    if not text:
+        return []
+    if text[0] in "[{" and text[-1] in "]}":
+        quoted = [item.strip() for item in _QUOTED.findall(text) if item.strip()]
+        if quoted:
+            return [item.replace('\\"', '"') for item in quoted]
+
+    parts: list[str] = []
+    for block in (b for b in text.split("\n") if b.strip()):
+        pieces = _NUMBERED.split(block) if _NUMBERED.search(block) else [block]
+        for piece in pieces:
+            for sentence in _LABELED_SENTENCE.split(piece):
+                parts.extend(_SUMMARY.split(sentence))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def format_reasoning_item(item: str) -> str:
+    """"Назва: текст" → жирна назва + текст; без назви — як є."""
+    match = _LABEL.match(item)
+    if match:
+        return f"{bold(match.group(1).strip() + ':')} {escape_html(match.group(2).strip())}"
+    return escape_html(item)
+
+
 def format_asset_message(row: dict) -> str:
     """Одне повідомлення про ОДИН актив — розгорнуто.
 
@@ -94,10 +138,15 @@ def format_asset_message(row: dict) -> str:
         escape_html(row["summary"]),
     ]
 
-    if row.get("reasoning"):
+    items = split_reasoning(row.get("reasoning"))
+    if items:
         lines.append("")
         lines.append(bold("Розбір по чинниках:"))
-        lines.append(escape_html(row["reasoning"]))
+        for item in items:
+            # Порожній рядок між пунктами: у Telegram це окремі
+            # абзаци, а не суцільна стіна.
+            lines.append("")
+            lines.append(f"▫️ {format_reasoning_item(item)}")
 
     strengths = row.get("strengths") or []
     risks = row.get("risks") or []

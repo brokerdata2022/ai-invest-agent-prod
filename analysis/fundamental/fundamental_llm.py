@@ -73,7 +73,9 @@ SYSTEM_PROMPT = (
     "(одне з: up, down, neutral, unclear — куди вказує ФУНДАМЕНТАЛЬНА "
     "картина бізнесу, не прогноз ціни), confidence (число від 0 до 1 — "
     "наскільки однозначна картина), summary (1-2 речення: головне про "
-    "стан бізнесу), reasoning (коротке обґрунтування для аудиту), "
+    "стан бізнесу), reasoning (МАСИВ рядків — розбір по показниках: "
+    "ОДИН пункт на показник у вигляді 'Назва показника: що з ним і що "
+    "це означає', останній пункт — 'Підсумок: ...'), "
     "strengths (МАСИВ рядків — сильні сторони, по одному пункту, "
     f"максимум {MAX_POINTS}; порожній масив, якщо їх немає), risks "
     f"(МАСИВ рядків — ризики й слабкі місця, максимум {MAX_POINTS}; "
@@ -110,6 +112,16 @@ def _parse_points(raw, label: str) -> list[str]:
     return points[:MAX_POINTS]
 
 
+def _reasoning_text(raw) -> str:
+    """reasoning — масив пунктів (з 2026-10-24) або, у старих і
+    непослушних відповідях, рядок. Зберігається рядком (колонка TEXT,
+    і його читають `/ask` і вердикт): пункти — через новий рядок, щоб
+    повідомлення показало кожен чинник окремим абзацом."""
+    if isinstance(raw, list):
+        return "\n".join(str(item).strip() for item in raw if str(item).strip())
+    return str(raw)
+
+
 def parse_fundamental_response(raw_content: str) -> FundamentalResult:
     data = parse_json_object(raw_content, error_class=SynthesisResponseError)
 
@@ -125,7 +137,7 @@ def parse_fundamental_response(raw_content: str) -> FundamentalResult:
         direction=direction,
         confidence=parse_confidence(data["confidence"], error_class=SynthesisResponseError),
         summary=data["summary"],
-        reasoning=data["reasoning"],
+        reasoning=_reasoning_text(data["reasoning"]),
         strengths=_parse_points(data.get("strengths"), "strengths"),
         risks=_parse_points(data.get("risks"), "risks"),
     )
@@ -281,9 +293,10 @@ ASSET_SYSTEM_PROMPT = (
     "direction (одне з: up, down, neutral, unclear — куди вказує "
     "СУКУПНІСТЬ чинників), confidence (число від 0 до 1 — наскільки "
     "чинники узгоджені між собою), summary (2-3 речення: головне про "
-    "актив і що зараз вирішальне), reasoning (розбір по чинниках: "
-    "який у який бік тисне — саме це користувач читає, щоб зрозуміти "
-    "висновок), strengths (МАСИВ рядків — чинники НА КОРИСТЬ "
+    "актив і що зараз вирішальне), reasoning (МАСИВ рядків — розбір по "
+    "чинниках: ОДИН пункт на чинник у вигляді 'Назва чинника: значення, "
+    "у який бік тисне і чому', останній пункт — 'Підсумок: ...'; саме це "
+    "користувач читає, щоб зрозуміти висновок), strengths (МАСИВ рядків — чинники НА КОРИСТЬ "
     f"зростання, максимум {MAX_POINTS}), risks (МАСИВ рядків — чинники "
     f"ПРОТИ, максимум {MAX_POINTS}; сюди ж — важливі прогалини в даних)."
 )

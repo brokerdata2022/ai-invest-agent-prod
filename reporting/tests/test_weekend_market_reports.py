@@ -126,3 +126,40 @@ def test_mark_all_unnotified_clears_whole_queue():
     assert mark_all_unnotified(conn) == 54
     assert "WHERE notified_at IS NULL" in conn.cur.sql
     assert conn.committed
+
+
+# --- розбір по чинниках абзацами (живий фідбек 2026-10-24) ---
+
+def test_inline_numbered_reasoning_becomes_paragraphs_with_bold_labels():
+    from fundamental_notify import format_asset_message
+
+    text = format_asset_message({
+        "asset_id": "xauusd", "asset_kind": "watchlist", "company_name": "Золото",
+        "direction": "down", "confidence": 0.65, "summary": "Тиск.",
+        "reasoning": "1) Ціна золота: знизилася з 4.18 до 4.01 тис. Імпульс униз. "
+                     "2) Дохідність 10Y: 5.19% → 5.13%. Підсумок: домінують негативні чинники.",
+        "strengths": [], "risks": [],
+    })
+    assert "\n\n▫️ <b>Ціна золота:</b> знизилася з 4.18 до 4.01 тис. Імпульс униз." in text
+    assert "\n\n▫️ <b>Дохідність 10Y:</b> 5.19% → 5.13%." in text
+    assert "\n\n▫️ <b>Підсумок:</b> домінують негативні чинники." in text
+
+
+def test_raw_json_reasoning_is_split_into_items():
+    from fundamental_notify import split_reasoning
+
+    items = split_reasoning('{"Ціна ETH: флет 2.40-2.44.","Обсяг торгів: падіння вшестеро."}')
+    assert items == ["Ціна ETH: флет 2.40-2.44.", "Обсяг торгів: падіння вшестеро."]
+
+
+def test_sentences_with_factor_labels_are_split():
+    from fundamental_notify import split_reasoning
+
+    items = split_reasoning("Ціна BTC: коридор 81.49-82.42 тис., відскок. Обсяг торгів: падіння. Капіталізація: 1655 млрд.")
+    assert [i.split(":")[0] for i in items] == ["Ціна BTC", "Обсяг торгів", "Капіталізація"]
+
+
+def test_new_line_separated_reasoning_is_kept_as_is():
+    from fundamental_notify import split_reasoning
+
+    assert split_reasoning("Ціна: впала на 4%\nПідсумок: тиск униз") == ["Ціна: впала на 4%", "Підсумок: тиск униз"]
